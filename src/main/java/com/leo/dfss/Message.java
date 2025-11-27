@@ -4,10 +4,6 @@ public class Message {
 
     /**
      * Represents a simple message we send over TCP as JSON.
-     *
-     * Examples as JSON:
-     * { "type": "PING", "data": null }
-     * { "type": "ECHO", "data": "hello" }
      */
     private String type;
     private String data;

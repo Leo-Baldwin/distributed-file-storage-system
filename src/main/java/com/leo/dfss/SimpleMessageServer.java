@@ -11,6 +11,9 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.time.LocalDate;
 
+/**
+ * Represents a simple TCP server that receives and handles JSON messages from a client.
+ */
 public class SimpleMessageServer {
     private static final int PORT = 9000;
     private static final Gson GSON = new Gson(); // New Gson object for wrapping JSON messages
