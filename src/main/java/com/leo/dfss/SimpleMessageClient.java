@@ -89,7 +89,7 @@ public class SimpleMessageClient {
                 System.out.println("Response type: " + response.getType());
                 System.out.println("Response data: " + response.getData());
 
-                if (response.getType().equals("QUIT")) {
+                if (response.getType().equals("QUIT") || response.getType().equals("QUIT_RESPONSE")) {
                     System.out.println("Client closed the connection.");
                     break;
                 }

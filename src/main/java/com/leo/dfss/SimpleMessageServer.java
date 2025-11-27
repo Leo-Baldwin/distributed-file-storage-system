@@ -88,7 +88,7 @@ public class SimpleMessageServer {
                         break;
                     case "ECHO":
                         // Echo back whatever the client sent in data
-                        response = new Message("ECHO", data != null ? data : "");
+                        response = new Message("ECHO_RESPONSE", data != null ? data : "");
                         break;
                     case "TIME":
                         // Return client server time
