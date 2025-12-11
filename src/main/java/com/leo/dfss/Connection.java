@@ -109,4 +109,13 @@ public class Connection extends Thread {
         }
         System.out.println("Connection " + connectionId + " closed.");
     }
+
+    public void shutdown() {
+        running = false;
+        try {
+            clientSocket.close();
+        } catch (IOException e) {
+            // ignore
+        }
+    }
 }
