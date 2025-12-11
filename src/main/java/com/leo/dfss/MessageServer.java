@@ -14,7 +14,7 @@ public class MessageServer {
     public static final int PORT = 9000;
     private final List<Connection> connections = new ArrayList<>();
 
-    private boolean running = true;
+    private volatile boolean running = true;
 
     public static void main(String[] args) {
         MessageServer server = new MessageServer();

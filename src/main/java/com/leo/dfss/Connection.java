@@ -19,7 +19,7 @@ public class Connection extends Thread {
 
     private final Socket clientSocket;
     private final int connectionId; // for logging/identification
-    private boolean running = true;
+    private volatile boolean running = true;
 
     public Connection(Socket clientSocket, int connectionId) {
         this.clientSocket = clientSocket;
@@ -36,10 +36,9 @@ public class Connection extends Thread {
                 );
                 PrintWriter out = new PrintWriter(clientSocket.getOutputStream(), true)
         ) {
-            out.println("Connection  " + connectionId + "configured. Send KSON messages per line.");
+            out.println("Connection  " + connectionId + " configured. Send JSON messages per line.");
 
             String line;
-
             while (running && (line = in.readLine()) != null) {
                 System.out.println("[" + connectionId + "] Raw message from client: " + line);
 
