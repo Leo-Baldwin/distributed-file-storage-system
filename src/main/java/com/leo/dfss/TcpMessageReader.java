@@ -31,14 +31,13 @@ public class TcpMessageReader {
      * Blocks until a full framed message is read, or EOF.
      *
      * @return ReceivedMessage (header + optional body), or null if end of byte stream.
-     * @throws IOException
      */
     public ReceivedMessage read() throws IOException {
         try {
             // 1) Read the 4-byte header length
             int headerLength = in.readInt(); // throws EOFException if stream is closed.
 
-            if (headerLength <= 0 {
+            if (headerLength <= 0) {
                 throw new IOException("Invalid header length");
             }
 
