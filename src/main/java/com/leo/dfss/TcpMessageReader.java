@@ -47,13 +47,9 @@ public class TcpMessageReader {
 
             String headerString =  new String(headerBytes, StandardCharsets.UTF_8);
 
-            // Parse the JsonObject before extracting bodyLength
-            JsonObject headerJson = GSON.fromJson(headerString, JsonObject.class);
-
-            int bodyLength = 0;
-            if (headerJson.has("bodyLength")) {
-                bodyLength = headerJson.get("bodyLength").getAsInt();
-            }
+            // Parse the header JSON into Message class for convenience
+            Message header = GSON.fromJson(headerString, Message.class);
+            int bodyLength = header.getBodyLength();
 
             // 3) If body exists, read that many bytes
             byte[] body = null;
@@ -61,9 +57,6 @@ public class TcpMessageReader {
                 body = new byte[bodyLength];
                 in.readFully(body);
             }
-
-            // Parse the header JSON into Message class for convenience
-            Message header = GSON.fromJson(headerString, Message.class);
 
             return new ReceivedMessage(header, body);
 

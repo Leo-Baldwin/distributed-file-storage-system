@@ -27,13 +27,10 @@ public class TcpMessageWriter {
 
     public void send(Message header, byte[] body) throws IOException {
         int bodyLength = (body != null) ? body.length : 0;
-
-        // Convert header (Message) to a JsonObject so the bodyLength can be injected
-        JsonObject headerJson = GSON.toJsonTree(header).getAsJsonObject();
-        headerJson.addProperty("bodyLength", bodyLength);
+        header.setBodyLength(bodyLength);
 
         // Serialise header JSON to bytes
-        String headerString = GSON.toJson(headerJson);
+        String headerString = GSON.toJson(header);
         byte[] headerBytes = headerString.getBytes(StandardCharsets.UTF_8);
         int headerLength = headerBytes.length;
 
