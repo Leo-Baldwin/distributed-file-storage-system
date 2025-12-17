@@ -24,12 +24,14 @@ public class MessageServer {
     public void start() {
         System.out.println("Starting MessageServer on port: " + PORT);
 
+        // Try-with resources to ensure automatic closure of connection
         try (ServerSocket serverSocket = new ServerSocket(PORT)) {
             System.out.println("Waiting for connections on port: " + PORT);
 
             int nextConnectionId = 1;
 
             while (running) {
+                // Blocks until client connects
                 Socket clientSocket = serverSocket.accept();
                 System.out.println("New client connected from " + clientSocket.getRemoteSocketAddress());
 
