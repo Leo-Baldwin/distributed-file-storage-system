@@ -28,7 +28,7 @@ public class FileMetadata {
         this.fileName = fileName;
         this.totalSizeBytes = totalSizeBytes;
         this.chunkSizeBytes = chunkSizeBytes;
-        this.totalChunks = totalChunks;
+        this.totalChunks = calculateTotalChunks(totalSizeBytes, chunkSizeBytes);
         this.createdAt = Instant.now();
     }
 
