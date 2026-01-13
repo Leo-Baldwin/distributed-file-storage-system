@@ -7,12 +7,15 @@ import java.nio.charset.StandardCharsets;
 public class FramedTestClient {
 
     private static final String HOST = "localhost";
-    private static final int PORT = 9020;
+    private static final int PORT = 9000;
 
     public static void main(String[] args) {
         try (Socket socket = new Socket(HOST, PORT)) {
             TcpMessageWriter writer = new TcpMessageWriter(socket.getOutputStream());
             TcpMessageReader reader = new TcpMessageReader(socket.getInputStream());
+
+            // Read server welcome
+            printResponse(reader);
 
             // 1) PING
             writer.send(new Message("PING", null), null);

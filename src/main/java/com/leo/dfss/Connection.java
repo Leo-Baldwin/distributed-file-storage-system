@@ -1,21 +1,13 @@
 package com.leo.dfss;
 
 import com.google.gson.Gson;
-import com.google.gson.JsonSyntaxException;
-
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.PrintWriter;
 import java.net.Socket;
-import java.time.LocalDate;
 
 /**
  * Handles a single client connection in its own thread.
  */
 public class Connection extends Thread {
-
-    private static final Gson GSON = new Gson(); // New Gson object for wrapping JSON messages
 
     private final Socket clientSocket;
     private final int connectionId; // for logging/identification
@@ -30,73 +22,54 @@ public class Connection extends Thread {
     public void run() {
         System.out.println("Connection " + connectionId + " created for " + clientSocket.getRemoteSocketAddress());
 
-        try (
-                BufferedReader in = new BufferedReader(
-                        new InputStreamReader(clientSocket.getInputStream())
-                );
-                PrintWriter out = new PrintWriter(clientSocket.getOutputStream(), true)
-        ) {
-            out.println("Connection  " + connectionId + " configured. Send JSON messages per line.");
+        try {
+            TcpMessageReader reader = new TcpMessageReader(clientSocket.getInputStream());
+            TcpMessageWriter writer = new  TcpMessageWriter(clientSocket.getOutputStream());
 
-            String line;
-            while (running && (line = in.readLine()) != null) {
-                System.out.println("[" + connectionId + "] Raw message from client: " + line);
+            writer.send(new Message("WELCOME", "Connection " + connectionId + " ready."), null);
 
-                Message clientRequest;
-                try {
-                    clientRequest = GSON.fromJson(line, Message.class);
-                } catch (JsonSyntaxException e) {
-                    System.out.println("[" + connectionId + "] Invalid JSON received from client.");
-                    Message error = new Message("ERROR", "Invalid JSON format");
-                    out.println(GSON.toJson(error));
+            while (running) {
+                ReceivedMessage receivedMessage = reader.read();
+
+                if  (receivedMessage == null) {
+                    System.out.println("[" + connectionId + "] Client disconnected.");
+                    break;
+                }
+
+                Message header = receivedMessage.getHeader();
+                byte[] body = receivedMessage.getBody();
+
+                if (header == null || header.getType() == null) {
+                    writer.send(new Message("ERROR", "Missing message type."), null);
                     continue;
                 }
 
-                if (clientRequest == null || clientRequest.getType() == null) {
-                    Message error = new Message("ERROR", "Message type is null");
-                    out.println(GSON.toJson(error));
-                    continue;
-                }
-
-                String type = clientRequest.getType();
-                String data = clientRequest.getData();
-                Message response;
+                String type = header.getType();
+                String data = header.getData();
 
                 switch (type) {
                     case "PING":
-                        // Health check, return Pong to notify client that server is alive
-                        response = new Message("PONG", "Pong from server (connection: " + connectionId + ")");
+                        writer.send(new Message("PONG", "Pong (connection " + connectionId + ")"), null);
                         break;
                     case "ECHO":
-                        // Echo back whatever the client sent in data
-                        response = new Message("ECHO_RESPONSE", data != null ? data : "");
+                        writer.send(new Message("ECHO_RESPONSE", data != null ? data : ""), null);
                         break;
-                    case "TIME":
-                        // Return client server time
-                        response = new Message("TIME_RESPONSE", LocalDate.now().toString());
+                    case "SEND_BODY":
+                        // Example of client sending a body (binary bytes)
+                        int length = body != null ? body.length : 0;
+                        writer.send(new Message("BODY_OK", "Received body length = " + length), null);
                         break;
+
                     case "QUIT":
-                        // Inform client the server is closing, then exit handleClient
-                        response = new Message("QUIT_RESPONSE", "Closing connection");
-                        out.println(GSON.toJson(response));
-                        System.out.println("[" + connectionId + "] Client requested QUIT.");
+                        writer.send(new Message("GOODBYE", "Closing connection"), null);
                         running = false; // break loop
                         break;
 
                     default:
-                        // Unknown message type
-                        response = new Message("ERROR", "Unknown message type: " + type);
+                        writer.send(new Message("ERROR", "Unknown message type: " + type), null);
                         break;
                 }
-
-                if (!running) {
-                    break;
-                }
-
-                String jsonResponse = GSON.toJson(response);
-                out.println(jsonResponse);
             }
-
         } catch (IOException e) {
             System.out.println("[" + connectionId + "] Connection error: " + e.getMessage());
         } finally {
