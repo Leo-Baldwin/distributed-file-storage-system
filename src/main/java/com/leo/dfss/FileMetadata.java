@@ -23,7 +23,7 @@ public class FileMetadata {
 
     private volatile Status status = Status.INIT;
 
-    public FileMetadata(String fileId, String fileName, long totalSizeBytes, int chunkSizeBytes, int totalChunks) {
+    public FileMetadata(String fileId, String fileName, long totalSizeBytes, int chunkSizeBytes) {
         this.fileId = fileId;
         this.fileName = fileName;
         this.totalSizeBytes = totalSizeBytes;
