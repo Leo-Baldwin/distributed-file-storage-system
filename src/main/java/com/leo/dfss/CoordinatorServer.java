@@ -9,7 +9,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
- * Server that accepts multiple clients and gives each one a Connection thread.
+ * Server that accepts multiple connections and gives each one a Connection thread.
  */
 public class CoordinatorServer {
 
