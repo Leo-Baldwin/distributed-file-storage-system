@@ -1,14 +1,14 @@
 package com.leo.dfss.coordinator;
 
 import com.leo.dfss.domain.FileMetadata;
+import com.leo.dfss.domain.NodeInfo;
 
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.*;
 
 /**
  * Server that accepts multiple connections and gives each one a Connection thread.
@@ -20,6 +20,16 @@ public class CoordinatorServer {
 
     // Global state tracker: fileId -> FileMetadata
     private final Map<String, FileMetadata> files = new ConcurrentHashMap<>();
+
+    // Global node registry: nodeId -> NodeInfo
+    private final Map<String, NodeInfo> nodes = new ConcurrentHashMap<>();
+
+    // Node heartbeat configuration
+    private static final long HEARTBEAT_TIMEOUT_MS = 15_000;    // 15 seconds
+    private static final long SWEEP_INTERVAL_MS = 5_000;        // 5 seconds
+
+    private final ScheduledExecutorService sweeper =
+            Executors.newSingleThreadScheduledExecutor();
 
     private final CopyOnWriteArrayList<CoordinatorConnection> connections = new CopyOnWriteArrayList<>();
 
@@ -39,6 +49,8 @@ public class CoordinatorServer {
             // Try-with resources to ensure automatic closure of connection
             try (ServerSocket serverSocket = new ServerSocket(port)) {
                 System.out.println("CoordinatorServer listening on port: " + port);
+
+                startNodeSweeper();
 
                 int nextConnectionId = 1;
 
@@ -61,6 +73,7 @@ public class CoordinatorServer {
                     System.out.println("CoordinatorServer stopped.");
                 }
             } finally {
+                sweeper.shutdownNow();
                 shutdownAllConnections();
             }
         }
@@ -71,6 +84,21 @@ public class CoordinatorServer {
                 connection.shutdown();
             }
             connections.clear();
+        }
+
+        private void startNodeSweeper() {
+            sweeper.scheduleAtFixedRate(() -> {
+                long now = System.currentTimeMillis();
+
+                for (NodeInfo node : nodes.values()) {
+                    long age = now - node.getLastSeenEpochMs();
+
+                    if (node.getStatus() == NodeInfo.Status.UP && age > HEARTBEAT_TIMEOUT_MS) {
+                        node.markDown();
+                        System.out.println("Node " + node.getNodeId() + " is DOWN");
+                    }
+                }
+            }, SWEEP_INTERVAL_MS, SWEEP_INTERVAL_MS, TimeUnit.MILLISECONDS);
         }
 
         /**
@@ -106,8 +134,42 @@ public class CoordinatorServer {
             }
 
             metadata.setStatus(FileMetadata.Status.COMPLETE);
-            System.out.println("Commited file record: " + metadata);
+            System.out.println("Committed file record: " + metadata);
             return true;
+        }
+
+        public boolean registerNode(String nodeId, String host, int port, long capacityBytes) {
+            long now =  System.currentTimeMillis();
+
+            if (nodeId == null || nodeId.isBlank()) return false;
+            if (host == null || host.isBlank()) return false;
+            if (port <= 0) return false;
+
+            NodeInfo node = new NodeInfo(nodeId, host, port, capacityBytes, now);
+            nodes.put(nodeId, node);
+
+            System.out.println("Node " + node.getNodeId() + " is registered");
+            return true;
+        }
+
+        public boolean handleHeartbeat(String nodeId, long timeStampEpochMs) {
+            NodeInfo node = nodes.get(nodeId); // Retrieve node by its ID
+            if (node == null) {
+                return false; // node cannot be retrieved
+            }
+
+            node.updateHeartbeat(timeStampEpochMs);
+            System.out.println("Heartbeat from node " + nodeId + " at " + timeStampEpochMs);
+            return true;
+        }
+
+        /**
+         * Method to inspect all current nodes.
+         *
+         * @return node registry
+         */
+        public Map<String, NodeInfo> getNodes() {
+            return nodes;
         }
 
         /** Method to lookup metadata of file by fileId.
@@ -115,7 +177,7 @@ public class CoordinatorServer {
          * @param fileId identifier of file being retrieved
          * @return the metadata of specified file
          */
-        public FileMetadata getFile (String fileId){
+        public FileMetadata getFile (String fileId) {
             return files.get(fileId);
         }
     }
