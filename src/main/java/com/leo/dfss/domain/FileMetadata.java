@@ -42,24 +42,31 @@ public class FileMetadata {
     public String getFileId() {
         return fileId;
     }
+
     public String getFileName() {
         return fileName;
     }
+
     public long getTotalSizeBytes() {
         return totalSizeBytes;
     }
+
     public int getChunkSizeBytes() {
         return chunkSizeBytes;
     }
+
     public int getTotalChunks() {
         return totalChunks;
     }
+
     public Instant getCreatedAt() {
         return createdAt;
     }
+
     public Status getStatus() {
         return status;
     }
+
     public void setStatus(Status status) {
         this.status = status;
     }

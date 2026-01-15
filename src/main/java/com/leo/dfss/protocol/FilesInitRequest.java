@@ -14,6 +14,7 @@ public class FilesInitRequest {
     public String getType() {
         return type;
     }
+
     public void setType(String type) {
         this.type = type;
     }
@@ -21,6 +22,7 @@ public class FilesInitRequest {
     public String getFilename() {
         return filename;
     }
+
     public void setFilename(String filename) {
         this.filename = filename;
     }
@@ -28,6 +30,7 @@ public class FilesInitRequest {
     public long getTotalSizeBytes() {
         return totalSizeBytes;
     }
+
     public void setTotalSizeBytes(long totalSizeBytes) {
         this.totalSizeBytes = totalSizeBytes;
     }
@@ -35,6 +38,7 @@ public class FilesInitRequest {
     public int getChunkSizeBytes() {
         return chunkSizeBytes;
     }
+
     public void setChunkSizeBytes(int chunkSizeBytes) {
         this.chunkSizeBytes = chunkSizeBytes;
     }
@@ -42,6 +46,7 @@ public class FilesInitRequest {
     public int getBodyLength() {
         return bodyLength;
     }
+
     public void setBodyLength(int bodyLength) {
         this.bodyLength = bodyLength;
     }

@@ -22,19 +22,23 @@ public class Message {
     public String getType() {
         return type;
     }
-    public String getData() {
-        return data;
-    }
-    public int getBodyLength() {
-        return bodyLength;
-    }
 
     public void setType(String type) {
         this.type = type;
     }
+
+    public String getData() {
+        return data;
+    }
+
     public void setData(String data) {
         this.data = data;
     }
+
+    public int getBodyLength() {
+        return bodyLength;
+    }
+
     public void setBodyLength(int bodyLength) {
         this.bodyLength = bodyLength;
     }

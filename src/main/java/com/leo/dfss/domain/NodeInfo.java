@@ -37,18 +37,23 @@ public class NodeInfo {
     public String getNodeId() {
         return nodeId;
     }
+
     public String getHost() {
         return host;
     }
+
     public int getPort() {
         return port;
     }
+
     public long getCapacityBytes() {
         return capacityBytes;
     }
+
     public long getLastSeenEpochMs() {
         return lastSeenEpochMs;
     }
+
     public Status getStatus() {
         return status;
     }
