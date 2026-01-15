@@ -1,4 +1,6 @@
-package com.leo.dfss;
+package com.leo.dfss.transport;
+
+import com.leo.dfss.protocol.Message;
 
 /**
  * Represents a single framed message read from a TCP stream:

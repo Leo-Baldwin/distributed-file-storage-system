@@ -1,6 +1,11 @@
-package com.leo.dfss;
+package com.leo.dfss.coordinator;
 
 import com.google.gson.Gson;
+import com.leo.dfss.domain.FileMetadata;
+import com.leo.dfss.protocol.*;
+import com.leo.dfss.transport.ReceivedMessage;
+import com.leo.dfss.transport.TcpMessageReader;
+import com.leo.dfss.transport.TcpMessageWriter;
 
 import java.io.IOException;
 import java.net.Socket;
@@ -95,13 +100,13 @@ public class CoordinatorConnection extends Thread {
         FilesInitRequest request;
 
         try {
-            request = gson.fromJson(data, FilesinitRequest.class);
+            request = gson.fromJson(data, FilesInitRequest.class);
         } catch (Exception e) {
             writer.send(new Message("ERROR", "Invalid JSON format for FILES_INIT_REQUEST."), null);
             return;
         }
 
-        if (request.getFilename() == null || request.getFileName().isBlank()) {
+        if (request.getFilename() == null || request.getFilename().isBlank()) {
             writer.send(new Message("ERROR", "Missing file name."), null);
             return;
         }
@@ -115,7 +120,12 @@ public class CoordinatorConnection extends Thread {
             return;
         }
 
-        FileMetadata meta = coordinator.initFileUpload(request.getFilename(), request.getTotalSizeBytes(), request.getChunkSizeBytes);
+        // Call Coordinator to initialise file upload with metadata
+        FileMetadata meta =
+                coordinator.initFileUpload(
+                        request.getFilename(),
+                        request.getTotalSizeBytes(),
+                        request.getChunkSizeBytes());
 
         // Respond to client with file details
         FilesInitResponse response = new FilesInitResponse();
@@ -124,23 +134,60 @@ public class CoordinatorConnection extends Thread {
         response.setTotalChunks(meta.getTotalChunks());
         response.setChunkSizeBytes(meta.getChunkSizeBytes());
 
-        writer.send(new Message("FILES_INIT_RESPONSE", gson.toJson(response)), null);
+        writer.send(new Message(
+                "FILES_INIT_RESPONSE", gson.toJson(response)),
+                null);
     }
 
     private void handleFilesCommit(Message header, TcpMessageWriter writer) throws IOException {
-        String fileId = header.getData();
-        if (fileId == null || fileId.isBlank()) {
-            writer.send(new Message("ERROR", "FILES_COMMIT requires data: fileId"), null);
+        String data = header.getData();
+
+        if (data == null || data.isBlank()) {
+            writer.send(new Message(
+                    "ERROR",
+                    "FILES_COMMIT requires JSON data"),
+                    null);
             return;
         }
 
-        boolean ok = coordinator.commitFile(fileId);
+        FilesCommitRequest request;
+        try {
+            request = gson.fromJson(data, FilesCommitRequest.class);
+        } catch (Exception e) {
+            writer.send(new Message(
+                    "ERROR",
+                    "Invalid JSON format for FILES_COMMIT."),
+                    null);
+            return;
+        }
+
+        if (request.getFileId() == null || request.getFileId().isBlank()) {
+            writer.send(new Message(
+                    "ERROR",
+                    "fileId is required"),
+                    null);
+            return;
+        }
+
+        boolean ok = coordinator.commitFile(data);
+
         if (!ok) {
-            writer.send(new Message("ERROR", "Unknown fileId: " + fileId), null);
+            writer.send(new Message(
+                    "ERROR",
+                    "Unknown fileId: " + request.getFileId()),
+                    null);
             return;
         }
 
-        writer.send(new Message("FILES_COMMIT_ACK", "Committed fileId=" + fileId), null);
+        FilesCommitAck ack = new FilesCommitAck();
+        ack.setFileId(request.getFileId());
+        ack.setStatus("OK");
+        ack.setMessage("FIle commited successfully");
+
+        writer.send(new Message(
+                "FILES_COMMIT_ACK",
+                gson.toJson(ack)),
+                null);
     }
 
     public void shutdown() {

@@ -1,4 +1,6 @@
-package com.leo.dfss;
+package com.leo.dfss.coordinator;
+
+import com.leo.dfss.domain.FileMetadata;
 
 import java.io.IOException;
 import java.net.ServerSocket;
@@ -10,6 +12,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * Server that accepts multiple connections and gives each one a Connection thread.
+ * Keeps a live registry of client and node connections.
  */
 public class CoordinatorServer {
 

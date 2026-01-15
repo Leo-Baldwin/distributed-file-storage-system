@@ -1,7 +1,7 @@
-package com.leo.dfss;
+package com.leo.dfss.transport;
 
 import com.google.gson.Gson;
-import com.google.gson.JsonObject;
+import com.leo.dfss.protocol.Message;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;

@@ -1,4 +1,4 @@
-package com.leo.dfss;
+package com.leo.dfss.protocol;
 
 /**
  * Represents a simple message sent over TCP as JSON.

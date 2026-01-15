@@ -1,4 +1,4 @@
-package com.leo.dfss;
+package com.leo.dfss.domain;
 
 import java.time.Instant;
 
