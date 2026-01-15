@@ -3,7 +3,7 @@ package com.leo.dfss.domain;
 import java.time.Instant;
 
 /**
- * File metadata tracked by the Coordinator for each file being uploaded/stored.
+ * Represents the file metadata tracked by the Coordinator for each file being uploaded/stored.
  * This object stored no file data (chunks) - only information about the file itself.
  */
 public class FileMetadata {
