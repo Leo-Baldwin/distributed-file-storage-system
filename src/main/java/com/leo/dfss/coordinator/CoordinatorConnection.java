@@ -1,11 +1,11 @@
 package com.leo.dfss.coordinator;
 
 import com.google.gson.Gson;
-import com.leo.dfss.domain.FileMetadata;
+import com.google.gson.JsonSyntaxException;
+
+import com.leo.dfss.domain.*;
 import com.leo.dfss.protocol.*;
-import com.leo.dfss.transport.ReceivedMessage;
-import com.leo.dfss.transport.TcpMessageReader;
-import com.leo.dfss.transport.TcpMessageWriter;
+import com.leo.dfss.transport.*;
 
 import java.io.IOException;
 import java.net.Socket;
@@ -66,7 +66,12 @@ public class CoordinatorConnection extends Thread {
                     case "FILES_COMMIT":
                         handleFilesCommit(header, writer);
                         break;
-
+                    case "NODE_REGISTER":
+                        handleNodeRegister(header, writer);
+                        break;
+                    case "NODE_HEARTBEAT":
+                        handleNodeHeartbeat(header, writer);
+                        break;
                     case "QUIT":
                         writer.send(new Message("GOODBYE", "Closing connection"), null);
                         running = false; // break loop
@@ -188,6 +193,91 @@ public class CoordinatorConnection extends Thread {
                 "FILES_COMMIT_ACK",
                 gson.toJson(ack)),
                 null);
+    }
+
+    private void handleNodeRegister(Message header, TcpMessageWriter writer) throws java.io.IOException {
+        String data = header.getData();
+        if (data == null) {
+            writer.send(new Message("ERROR", "NODE_REGISTER requires JSON data"), null);
+            return;
+        }
+
+        NodeRegisterRequest req;
+        try {
+            req = gson.fromJson(data, NodeRegisterRequest.class);
+        } catch (JsonSyntaxException e) {
+            writer.send(new Message("ERROR", "Invalid JSON format for NODE_REGISTER"), null);
+            return;
+        }
+
+        if (req.getNodeId() == null || req.getNodeId().isBlank()
+                || req.getHost() == null || req.getHost().isBlank()
+                || req.getPort() <= 0) {
+
+            NodeRegisterAck ack = new NodeRegisterAck();
+            ack.setStatus("ERROR");
+            ack.setMessage("Missing/invalid fields (nodeId, host, port)");
+
+            writer.send(new Message("NODE_REGISTER_ACK", gson.toJson(ack)), null);
+            return;
+        }
+
+        boolean ok = coordinator.registerNode(
+                req.getNodeId(),
+                req.getHost(),
+                req.getPort(),
+                req.getCapacityBytes()
+        );
+
+        NodeRegisterAck ack = new NodeRegisterAck();
+        if (ok) {
+            ack.setStatus("OK");
+            ack.setMessage("Node registered");
+        } else {
+            ack.setStatus("ERROR");
+            ack.setMessage("Registration failed (invalid fields)");
+        }
+
+        writer.send(new Message("NODE_REGISTER_ACK", gson.toJson(ack)), null);
+    }
+
+    private void handleNodeHeartbeat(Message header, TcpMessageWriter writer) throws java.io.IOException {
+        String data = header.getData();
+        if (data == null) {
+            writer.send(new Message("ERROR", "NODE_HEARTBEAT requires JSON data"), null);
+            return;
+        }
+
+        NodeHeartbeat hb;
+        try {
+            hb = gson.fromJson(data, NodeHeartbeat.class);
+        } catch (JsonSyntaxException e) {
+            writer.send(new Message("ERROR", "Invalid JSON format for NODE_HEARTBEAT"), null);
+            return;
+        }
+
+        if (hb.getNodeId() == null || hb.getNodeId().isBlank()) {
+            writer.send(new Message("ERROR", "Heartbeat missing nodeId"), null);
+            return;
+        }
+
+        // If node didn't include a timestamp, you could default it; but we expect it.
+        long ts = hb.getTimestampEpochMs();
+        if (ts <= 0) {
+            ts = System.currentTimeMillis();
+        }
+
+        boolean ok = coordinator.handleHeartbeat(hb.getNodeId(), ts);
+        if (!ok) {
+            writer.send(new Message("ERROR", "Unknown nodeId: " + hb.getNodeId()), null);
+            return;
+        }
+
+        NodeHeartbeatAck ack = new NodeHeartbeatAck();
+        ack.setStatus("OK");
+        ack.setServerTimeEpochMs(System.currentTimeMillis());
+
+        writer.send(new Message("NODE_HEARTBEAT_ACK", gson.toJson(ack)), null);
     }
 
     public void shutdown() {
