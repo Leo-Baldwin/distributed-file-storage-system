@@ -18,7 +18,7 @@ public class CoordinatorServer {
 
     public final int port;
 
-    // Global state tracker: fileId -> FileMetadata
+    // Global file registry: fileId -> FileMetadata
     private final Map<String, FileMetadata> files = new ConcurrentHashMap<>();
 
     // Global node registry: nodeId -> NodeInfo
