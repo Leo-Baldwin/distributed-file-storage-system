@@ -4,7 +4,7 @@ import java.time.Instant;
 
 /**
  * Represents the file metadata tracked by the Coordinator for each file being uploaded/stored.
- * This object stored no file data (chunks) - only information about the file itself.
+ * This object stores no file data (chunks) - only information about the file itself.
  */
 public class FileMetadata {
 
