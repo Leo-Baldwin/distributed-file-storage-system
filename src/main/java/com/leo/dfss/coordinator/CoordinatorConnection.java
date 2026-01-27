@@ -132,12 +132,22 @@ public class CoordinatorConnection extends Thread {
                         request.getTotalSizeBytes(),
                         request.getChunkSizeBytes());
 
+        // Get active node to give as chunk upload location
+        NodeInfo node = coordinator.getAnyActiveNode();
+        if (node == null) {
+            writer.send(new Message("ERROR", "No active nodes available."), null);
+            return;
+        }
+
+
         // Respond to client with file details
         FilesInitResponse response = new FilesInitResponse();
 
         response.setFileId(meta.getFileId());
         response.setTotalChunks(meta.getTotalChunks());
         response.setChunkSizeBytes(meta.getChunkSizeBytes());
+        response.setUploadHost(node.getHost());
+        response.setUploadPort(node.getPort());
 
         writer.send(new Message(
                 "FILES_INIT_RESPONSE", gson.toJson(response)),

@@ -163,6 +163,14 @@ public class CoordinatorServer {
             return true;
         }
 
+    /** @return the first UP node it finds in the node registry */
+    public NodeInfo getAnyActiveNode() {
+            for (NodeInfo node : nodes.values()) {
+                if (node.getStatus() == NodeInfo.Status.UP) return node;
+            }
+            return null;
+        }
+
         /**
          * Method to inspect all current nodes.
          *

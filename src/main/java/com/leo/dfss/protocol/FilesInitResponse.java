@@ -6,6 +6,8 @@ public class FilesInitResponse {
     private String fileId;
     private int totalChunks;
     private int chunkSizeBytes;
+    private String uploadHost;
+    private int uploadPort;
     private int bodyLength = 0;
 
     public FilesInitResponse() {
@@ -41,6 +43,22 @@ public class FilesInitResponse {
 
     public void setChunkSizeBytes(int chunkSizeBytes) {
         this.chunkSizeBytes = chunkSizeBytes;
+    }
+
+    public String getUploadHost() {
+        return uploadHost;
+    }
+
+    public void setUploadHost(String uploadHost) {
+        this.uploadHost = uploadHost;
+    }
+
+    public int getUploadPort() {
+        return uploadPort;
+    }
+
+    public void setUploadPort(int uploadPort) {
+        this.uploadPort = uploadPort;
     }
 
     public int getBodyLength() {
