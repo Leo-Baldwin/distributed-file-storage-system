@@ -36,7 +36,9 @@ public class FileMetadata {
         if  (chunkSizeBytes <= 0) {
             throw new IllegalArgumentException("chunkSizeBytes must be greater than 0");
         }
-        return (int) (totalSizeBytes / chunkSizeBytes);
+
+        return (totalSizeBytes == 0) ? 0 :
+                (int) ((totalSizeBytes + chunkSizeBytes - 1) / chunkSizeBytes);
     }
 
     public String getFileId() {
