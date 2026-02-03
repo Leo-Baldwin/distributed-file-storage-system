@@ -55,6 +55,16 @@ public class UploadOrchestratorClient {
         debugChunkFile(filePath, init.getChunkSizeBytes(), init.getTotalChunks());
 
         uploadChunksToNode(filePath, init);
+
+        FilesCommitAck commitAck = commitUploadWithCoordinator(init.getFileId());
+
+        System.out.println("\n--- Commit result ---");
+        System.out.println("status  = " + commitAck.getStatus());
+        System.out.println("message = " + commitAck.getMessage());
+
+        if (!"OK".equalsIgnoreCase(commitAck.getStatus())) {
+            throw new RuntimeException("Commit failed: " + commitAck.getMessage());
+        }
     }
 
     private FilesInitResponse initUploadWithCoordinator (
@@ -125,7 +135,7 @@ public class UploadOrchestratorClient {
                 // Copy only the bytes actually read (important for last chunk)
                 byte[] chunkBytes = java.util.Arrays.copyOf(buffer, bytesRead);
 
-                System.out.println("chunk[" + chunkIndex + "] bytesRead=" + bytesRead);
+                System.out.println("chunk[" + chunkIndex + "] bytesRead=" + chunkBytes.length);
 
                 chunkIndex++;
             }
@@ -219,5 +229,46 @@ public class UploadOrchestratorClient {
         }
 
         System.out.println("All chunks uploaded successfully.");
+    }
+
+    private FilesCommitAck commitUploadWithCoordinator(String fileId) {
+        try (Socket socket = new Socket(coordinatorHost, coordinatorPort)) {
+            TcpMessageReader reader = new TcpMessageReader(socket.getInputStream());
+            TcpMessageWriter writer = new TcpMessageWriter(socket.getOutputStream());
+
+            // Read welcome message from CoordinatorServer
+            ReceivedMessage welcome = reader.read();
+            if (welcome != null && welcome.getHeader() != null) {
+                System.out.println("Coordinator -> " + welcome.getHeader().getType() + " " + welcome.getHeader().getData());
+            }
+
+            // Build commit request
+            FilesCommitRequest req = new FilesCommitRequest();
+            req.setFileId(fileId);
+            req.setBodyLength(0);
+
+            // Send FILES_COMMIT
+            writer.send(new Message("FILES_COMMIT", gson.toJson(req)), null);
+
+            // Read response
+            ReceivedMessage resp = reader.read();
+            if (resp == null || resp.getHeader() == null) {
+                throw new RuntimeException("File commit failed");
+            }
+
+            Message header = resp.getHeader();
+            String type = header.getType();
+            String data = header.getData();
+
+            if ("FILES_COMMIT_ACK".equals(type)) {
+                FilesCommitAck ack = gson.fromJson(data, FilesCommitAck.class);
+                return ack;
+            }
+
+            throw new RuntimeException("Coordinator returned " + type + ": " + data);
+
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to commit upload with Coordinator. ", e);
+        }
     }
 }

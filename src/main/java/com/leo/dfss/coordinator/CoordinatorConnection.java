@@ -184,7 +184,7 @@ public class CoordinatorConnection extends Thread {
             return;
         }
 
-        boolean ok = coordinator.commitFile(data);
+        boolean ok = coordinator.commitFile(request.getFileId());
 
         if (!ok) {
             writer.send(new Message(
