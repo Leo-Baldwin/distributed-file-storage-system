@@ -77,7 +77,7 @@ public class UploadOrchestratorClient {
             TcpMessageWriter writer = new TcpMessageWriter(socket.getOutputStream());
 
             // Read welcome message from coordinator server
-            ReceivedMessage welcome =reader.read();
+            ReceivedMessage welcome = reader.read();
             if (welcome != null && welcome.getHeader() != null) {
                 System.out.println("Coordinator: " + welcome.getHeader().getType() + " " + welcome.getHeader().getData());
             }
@@ -92,7 +92,7 @@ public class UploadOrchestratorClient {
             // Send request
             writer.send(new Message("FILES_INIT_REQUEST", gson.toJson(request)), null);
 
-            // Read response
+            // Read response from server
             ReceivedMessage resp = reader.read();
             if (resp == null || resp.getHeader() == null) {
                 throw new RuntimeException("Failed to read response from coordinator.");
@@ -103,9 +103,7 @@ public class UploadOrchestratorClient {
             String data = header.getData();
 
             if ("FILES_INIT_RESPONSE".equals(type)) {
-                FilesInitResponse response = gson.fromJson(data, FilesInitResponse.class);
-
-                return response;
+                return gson.fromJson(data, FilesInitResponse.class);
             }
 
             // If response not read and returned then throw error
@@ -188,7 +186,7 @@ public class UploadOrchestratorClient {
                     TcpMessageReader reader = new TcpMessageReader(socket.getInputStream());
                     TcpMessageWriter writer = new TcpMessageWriter(socket.getOutputStream());
 
-                    // Read Node WELCOME
+                    // Read welcome message from node server
                     ReceivedMessage welcome = reader.read();
                     if (welcome != null && welcome.getHeader() != null) {
                         System.out.println("Node -> " + welcome.getHeader().getType());

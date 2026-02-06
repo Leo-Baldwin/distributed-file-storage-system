@@ -104,16 +104,29 @@ public class CoordinatorServer {
         /**
          * Handles the FILES_INIT_REQUEST command. Creates a new file record and returns the metadata.
          *
-         * @param filename name of the file
+         * @param filename       name of the file
          * @param totalSizeBytes total size of the file
          * @param chunkSizeBytes size of each chunk
          * @return the metadata of the file
          */
-        public FileMetadata initFileUpload (String filename, long totalSizeBytes, int chunkSizeBytes) {
+        public FileMetadata initFileUpload (String filename,
+                                            long totalSizeBytes,
+                                            int chunkSizeBytes) {
+
+            NodeInfo node = getAnyActiveNode();
+            if (node == null) {
+                throw new IllegalStateException("No active storage nodes available");
+            }
+
             String fileId = UUID.randomUUID().toString();
 
-            FileMetadata metadata = new FileMetadata(fileId, filename, totalSizeBytes, chunkSizeBytes);
+            FileMetadata metadata =
+                    new FileMetadata(fileId, filename, totalSizeBytes, chunkSizeBytes);
+
             metadata.setStatus(FileMetadata.Status.UPLOADING);
+
+            metadata.setStorageHost(node.getHost());
+            metadata.setStoragePort(node.getPort());
 
             files.put(fileId, metadata);
 

@@ -9,6 +9,7 @@ public class FilesGetResponse {
     private int downloadPort;
 
     // Getters & Setters
+
     public String getFileId() {
         return fileId;
     }

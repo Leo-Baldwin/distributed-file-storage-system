@@ -66,6 +66,9 @@ public class CoordinatorConnection extends Thread {
                     case "FILES_COMMIT":
                         handleFilesCommit(header, writer);
                         break;
+                    case "FILES_GET_REQUEST":
+                        handleFilesGet(header, writer);
+                        break;
                     case "NODE_REGISTER":
                         handleNodeRegister(header, writer);
                         break;
@@ -203,6 +206,33 @@ public class CoordinatorConnection extends Thread {
                 "FILES_COMMIT_ACK",
                 gson.toJson(ack)),
                 null);
+    }
+
+    private void handleFilesGet(Message header, TcpMessageWriter writer) throws IOException {
+        String data = header.getData();
+
+        FilesGetRequest request =  gson.fromJson(data, FilesGetRequest.class);
+        FileMetadata metadata = coordinator.getFile(request.getFileId());
+
+        if (metadata == null) {
+            writer.send(new Message("Error", "Unknown fileId: " + request.getFileId()), null);
+            return;
+        }
+
+        if (!metadata.getStatus().equals("COMPLETE")) {
+            writer.send(new Message("ERROR", "File is not committed yet"), null);
+            return;
+        }
+
+        FilesGetResponse response = new FilesGetResponse();
+        response.setFileId(metadata.getFileId());
+        response.setFilename(metadata.getFileName());
+        response.setTotalChunks(metadata.getTotalChunks());
+        response.setChunkSizeBytes(metadata.getChunkSizeBytes());
+        response.setDownloadHost(metadata.getStorageHost());
+        response.setDownloadPort(metadata.getStoragePort());
+
+        writer.send(new Message("FILES_GET_RESPONSE", gson.toJson(response)), null);
     }
 
     private void handleNodeRegister(Message header, TcpMessageWriter writer) throws java.io.IOException {

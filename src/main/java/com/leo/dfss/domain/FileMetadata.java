@@ -20,6 +20,8 @@ public class FileMetadata {
     private final int chunkSizeBytes;
     private final int totalChunks;
     private final Instant createdAt;
+    private String storageHost;
+    private int storagePort;
 
     private volatile Status status = Status.INIT;
 
@@ -63,6 +65,22 @@ public class FileMetadata {
 
     public Instant getCreatedAt() {
         return createdAt;
+    }
+
+    public String getStorageHost() {
+        return storageHost;
+    }
+
+    public void setStorageHost(String storageHost) {
+        this.storageHost = storageHost;
+    }
+
+    public int getStoragePort() {
+        return storagePort;
+    }
+
+    public void setStoragePort(int storagePort) {
+        this.storagePort = storagePort;
     }
 
     public Status getStatus() {

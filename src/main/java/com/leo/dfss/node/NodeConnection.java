@@ -3,9 +3,7 @@ package com.leo.dfss.node;
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
 import com.leo.dfss.domain.ChunkStore;
-import com.leo.dfss.protocol.ChunkUploadAck;
-import com.leo.dfss.protocol.ChunkUploadRequest;
-import com.leo.dfss.protocol.Message;
+import com.leo.dfss.protocol.*;
 import com.leo.dfss.transport.ReceivedMessage;
 import com.leo.dfss.transport.TcpMessageReader;
 import com.leo.dfss.transport.TcpMessageWriter;
@@ -39,7 +37,7 @@ public class NodeConnection extends Thread {
             TcpMessageWriter writer = new TcpMessageWriter(socket.getOutputStream());
 
             // Great client
-            writer.send(new Message("WELCOME", "Node connection " + connectionId + "configured."), null);
+            writer.send(new Message("WELCOME", "Node connection " + connectionId + " configured."), null);
 
             while (running) {
                 ReceivedMessage received = reader.read();
@@ -67,8 +65,13 @@ public class NodeConnection extends Thread {
                         handleChunkUpload(header, body, writer);
                         break;
 
+                    case "CHUNK_DOWNLOAD":
+                        handleChunkDownload(header, body, writer);
+                        break;
+
                     case "QUIT":
                         writer.send(new Message("GOODBYE", "Closing node connection"), null);
+                        running = false;
                         break;
 
                     default:
@@ -82,8 +85,8 @@ public class NodeConnection extends Thread {
             try {
                 socket.close();
             } catch (IOException ignore) {
-                System.out.println("NodeConnection " + connectionId + " closed.");
             }
+            System.out.println("NodeConnection " + connectionId + " closed.");
         }
     }
 
@@ -104,7 +107,7 @@ public class NodeConnection extends Thread {
         }
 
         if (request.getFileId() == null || request.getFileId().isBlank()) {
-            writer.send(new Message("ERROR", "CHUNK_UPLOAD missing fieldId"), null);
+            writer.send(new Message("ERROR", "CHUNK_UPLOAD missing fileId"), null);
             return;
         }
 
@@ -146,6 +149,49 @@ public class NodeConnection extends Thread {
         ack.setMessage("Chunk uploaded successfully");
 
         writer.send(new Message("CHUNK_UPLOAD_ACK", gson.toJson(ack)), null);
+    }
+
+    private void handleChunkDownload(Message header, byte[] body, TcpMessageWriter writer) throws IOException {
+        String data = header.getData();
+
+        if (data == null || data.isBlank()) {
+            writer.send(new Message("ERROR", "CHUNK_DOWNLOAD requires JSON data"), null);
+            return;
+        }
+
+        ChunkDownloadRequest request;
+        try {
+            request = gson.fromJson(data, ChunkDownloadRequest.class);
+        } catch (Exception e) {
+            writer.send(new Message("ERROR", "Invalid JSON for CHUNK_DOWNLOAD"), null);
+            return;
+        }
+
+        byte[] chunkBytes;
+        try {
+            chunkBytes = chunkStore.readChunk(
+                    request.getFileId(),
+                    request.getChunkIndex()
+            );
+        } catch (Exception e) {
+            writer.send(new Message("ERROR", "Failed to read chunk: " + e.getMessage()), null);
+            return;
+        }
+
+        if (chunkBytes == null) {
+            writer.send(new Message("ERROR", "Chunk not found"), null);
+            return;
+        }
+
+        ChunkDownloadResponse response = new ChunkDownloadResponse();
+        response.setStatus("OK");
+        response.setMessage("Chunk read");
+        response.setBodyLength(chunkBytes.length);
+
+        writer.send(new Message(
+                "CHUNK_DOWNLOAD_RESPONSE",
+                gson.toJson(response)),
+                chunkBytes);
     }
 
     public void shutdown() {
