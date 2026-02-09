@@ -65,7 +65,11 @@ public class ChunkStore {
             throw new IllegalArgumentException("chunkIndex cannot be negative");
         }
 
-        Path ChunkPath = chunksDir.resolve(fileId + ".bin");
+        Path ChunkPath = baseDir
+                .resolve("chunks")
+                .resolve(fileId)
+                .resolve(chunkIndex + ".bin");
+
         return Files.readAllBytes(ChunkPath);
     }
 

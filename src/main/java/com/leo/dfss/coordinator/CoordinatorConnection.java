@@ -243,7 +243,7 @@ public class CoordinatorConnection extends Thread {
 
         FilesGetResponse response = new FilesGetResponse();
         response.setFileId(metadata.getFileId());
-        response.setFilename(metadata.getFilename());
+        response.setFilename(metadata.getFileName());
         response.setTotalChunks(metadata.getTotalChunks());
         response.setChunkSizeBytes(metadata.getChunkSizeBytes());
         response.setDownloadHost(metadata.getStorageHost());

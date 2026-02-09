@@ -141,12 +141,24 @@ public class CoordinatorServer {
          * @return true if successfully committed, else false.
          */
         public boolean commitFile (String fileId){
+
+            // TEMPORARY DEBUGGER START
+            System.out.println("commitFile called for: " + fileId);
+            FileMetadata m = files.get(fileId);
+            System.out.println("metadata status BEFORE = " + (m == null ? "null" : m.getStatus()));
+            // DEBUG END
+
             FileMetadata metadata = files.get(fileId);
             if (metadata == null) {
                 return false;
             }
 
             metadata.setStatus(FileMetadata.Status.COMPLETE);
+
+            // TEMP DEBUG
+            System.out.println("metadata status AFTER = " + m.getStatus());
+            // DEBUG END
+
             System.out.println("Committed file record: " + metadata);
             return true;
         }
