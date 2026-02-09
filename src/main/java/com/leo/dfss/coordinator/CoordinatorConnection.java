@@ -211,22 +211,39 @@ public class CoordinatorConnection extends Thread {
     private void handleFilesGet(Message header, TcpMessageWriter writer) throws IOException {
         String data = header.getData();
 
-        FilesGetRequest request =  gson.fromJson(data, FilesGetRequest.class);
-        FileMetadata metadata = coordinator.getFile(request.getFileId());
-
-        if (metadata == null) {
-            writer.send(new Message("Error", "Unknown fileId: " + request.getFileId()), null);
+        if (data == null || data.isBlank()) {
+            writer.send(new Message("ERROR", "FILES_GET_REQUEST requires JSON data"), null);
             return;
         }
 
-        if (!metadata.getStatus().equals("COMPLETE")) {
+        FilesGetRequest request;
+        try {
+            request = gson.fromJson(data, FilesGetRequest.class);
+        } catch (Exception e) {
+            writer.send(new Message("ERROR", "Invalid JSON format for FILES_GET_REQUEST"), null);
+            return;
+        }
+
+        if (request.getFileId() == null || request.getFileId().isBlank()) {
+            writer.send(new Message("ERROR", "fileId is required"), null);
+            return;
+        }
+
+        FileMetadata metadata = coordinator.getFile(request.getFileId());
+
+        if (metadata == null) {
+            writer.send(new Message("ERROR", "Unknown fileId: " + request.getFileId()), null);
+            return;
+        }
+
+        if (metadata.getStatus() != FileMetadata.Status.COMPLETE) {
             writer.send(new Message("ERROR", "File is not committed yet"), null);
             return;
         }
 
         FilesGetResponse response = new FilesGetResponse();
         response.setFileId(metadata.getFileId());
-        response.setFilename(metadata.getFileName());
+        response.setFilename(metadata.getFilename());
         response.setTotalChunks(metadata.getTotalChunks());
         response.setChunkSizeBytes(metadata.getChunkSizeBytes());
         response.setDownloadHost(metadata.getStorageHost());
