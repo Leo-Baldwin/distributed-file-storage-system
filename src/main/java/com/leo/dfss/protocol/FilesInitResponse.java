@@ -2,6 +2,9 @@ package com.leo.dfss.protocol;
 
 public class FilesInitResponse {
 
+    /**
+     * Response protocol message sent back by the Coordinator in response to a FileInitRequest message.
+     */
     private String type = "FILES_INIT_RESPONSE";
     private String fileId;
     private int totalChunks;

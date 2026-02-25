@@ -1,5 +1,8 @@
 package com.leo.dfss.protocol;
 
+/**
+ * Protocol message sent in response to a NodeHeartbeat message by a server to verify status.
+ */
 public class NodeHeartbeatAck {
 
     private String type = "NODE_HEARTBEAT_ACK";

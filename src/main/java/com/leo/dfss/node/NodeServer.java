@@ -16,6 +16,9 @@ import java.nio.file.Path;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 
+/**
+ * Server that accepts connections and gives each one its own thread.
+ */
 public class NodeServer {
 
     private static final Gson gson = new Gson();
@@ -94,7 +97,7 @@ public class NodeServer {
                                 " " + welcome.getHeader().getData());
                     }
 
-                    // Send NODE_REGISTER (with this NdeServer's data port)
+                    // Send NODE_REGISTER (with this NodeServer's data port)
                     NodeRegisterRequest request = new NodeRegisterRequest();
                     request.setNodeId(nodeId);
                     request.setHost("localhost");

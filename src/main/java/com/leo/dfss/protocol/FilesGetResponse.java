@@ -1,5 +1,8 @@
 package com.leo.dfss.protocol;
 
+/**
+ * Response message sent back by Coordinator after a FilesGetRequest.
+ */
 public class FilesGetResponse {
     private String fileId;
     private String filename;

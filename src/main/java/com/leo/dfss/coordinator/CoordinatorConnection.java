@@ -24,6 +24,13 @@ public class CoordinatorConnection extends Thread {
 
     private static final Gson gson = new Gson();
 
+    /**
+     * Initialises a new CoordinatorConnection thread.
+     *
+     * @param socket
+     * @param connectionId
+     * @param coordinator
+     */
     public CoordinatorConnection(Socket socket, int connectionId, CoordinatorServer coordinator) {
         this.socket = socket;
         this.connectionId = connectionId;
@@ -41,6 +48,7 @@ public class CoordinatorConnection extends Thread {
             writer.send(new Message("WELCOME", "Connection " + connectionId + " ready."), null);
 
             while (running) {
+                // Reads the protocol message coming from the client
                 ReceivedMessage receivedMessage = reader.read();
                 if  (receivedMessage == null) {
                     System.out.println("[" + connectionId + "] Client disconnected.");
@@ -56,10 +64,8 @@ public class CoordinatorConnection extends Thread {
 
                 String type = header.getType();
 
+                // Switch statement calls the appropriate method for handling the received protocol message depending on its type
                 switch (type) {
-                    case "PING":
-                        writer.send(new Message("PONG", "Pong (connection " + connectionId + ")"), null);
-                        break;
                     case "FILES_INIT_REQUEST":
                         handleFilesInit(header, writer);
                         break;

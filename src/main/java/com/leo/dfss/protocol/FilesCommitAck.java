@@ -1,5 +1,8 @@
 package com.leo.dfss.protocol;
 
+/**
+ * Response sent by Coordinator to acknowledge commit request.
+ */
 public class FilesCommitAck {
     private String type = "FILES_COMMIT_ACK";
     private String fileId;

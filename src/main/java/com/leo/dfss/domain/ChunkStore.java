@@ -6,7 +6,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 
 /**
- * Class responsible for writing chunk bytes to disk and loading them back.
+ * Responsible for writing chunk bytes to disk and loading them back.
  */
 public class ChunkStore {
 

@@ -11,6 +11,9 @@ import com.leo.dfss.transport.TcpMessageWriter;
 import java.io.IOException;
 import java.net.Socket;
 
+/**
+ * Handles a single node connection in its own thread.
+ */
 public class NodeConnection extends Thread {
 
     private static final Gson gson = new Gson();

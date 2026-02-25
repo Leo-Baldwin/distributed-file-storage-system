@@ -1,5 +1,8 @@
 package com.leo.dfss.protocol;
 
+/**
+ * Protocol message used to register a new node.
+ */
 public class NodeRegisterRequest {
 
     private String type = "NODE_REGISTER";

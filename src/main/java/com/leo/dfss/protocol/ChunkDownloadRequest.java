@@ -1,5 +1,8 @@
 package com.leo.dfss.protocol;
 
+/**
+ * Protocol message for downloading a chunk from a node.
+ */
 public class ChunkDownloadRequest {
     private String fileId;
     private int chunkIndex;

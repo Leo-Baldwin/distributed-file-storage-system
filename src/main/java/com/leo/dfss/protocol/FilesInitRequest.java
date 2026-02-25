@@ -2,6 +2,9 @@ package com.leo.dfss.protocol;
 
 public class FilesInitRequest {
 
+    /**
+     * Protocol message sent to the Coordinator to initiate file upload.
+     */
     private String type = "FILES_INIT_REQUEST";
     private String filename;
     private long totalSizeBytes;

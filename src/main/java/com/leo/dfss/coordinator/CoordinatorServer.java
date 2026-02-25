@@ -31,6 +31,7 @@ public class CoordinatorServer {
     private final ScheduledExecutorService sweeper =
             Executors.newSingleThreadScheduledExecutor();
 
+    // Global connections registry
     private final CopyOnWriteArrayList<CoordinatorConnection> connections = new CopyOnWriteArrayList<>();
 
     private volatile boolean running = true;
@@ -59,9 +60,11 @@ public class CoordinatorServer {
                     Socket socket = serverSocket.accept();
                     System.out.println("Accepted connected from " + socket.getRemoteSocketAddress());
 
+                    // Initialises new connection thread with a client socket, unique identifier and CoordinatorServer
                     CoordinatorConnection connection =
                             new CoordinatorConnection(socket, nextConnectionId++, this);
 
+                    // Adds new connection thread to global connections registry and starts the thread
                     connections.add(connection);
                     connection.start();
                 }
@@ -78,7 +81,11 @@ public class CoordinatorServer {
             }
         }
 
-        public void shutdownAllConnections () {
+    /**
+     * Method used to iterate through all threads in the connections list and shut them down.
+     * Once all connections are closed the global registry is cleared.
+     */
+    public void shutdownAllConnections () {
             System.out.println("Shutting down all connections...");
             for (CoordinatorConnection connection : connections) {
                 connection.shutdown();
@@ -86,7 +93,11 @@ public class CoordinatorServer {
             connections.clear();
         }
 
-        private void startNodeSweeper() {
+    /**
+     * Begins a sweeper that periodically checks for a nodes heartbeat, if no heartbeat is detected
+     * for more than 15 seconds then it will mark the Nodes status as DOWN.
+     */
+    private void startNodeSweeper() {
             sweeper.scheduleAtFixedRate(() -> {
                 long now = System.currentTimeMillis();
 
@@ -101,15 +112,15 @@ public class CoordinatorServer {
             }, SWEEP_INTERVAL_MS, SWEEP_INTERVAL_MS, TimeUnit.MILLISECONDS);
         }
 
-        /**
-         * Handles the FILES_INIT_REQUEST command. Creates a new file record and returns the metadata.
-         *
-         * @param filename       name of the file
-         * @param totalSizeBytes total size of the file
-         * @param chunkSizeBytes size of each chunk
-         * @return the metadata of the file
-         */
-        public FileMetadata initFileUpload (String filename,
+    /**
+     * Handles the FILES_INIT_REQUEST command. Creates a new file record and returns the metadata.
+     *
+     * @param filename       name of the file
+     * @param totalSizeBytes total size of the file
+     * @param chunkSizeBytes size of each chunk
+     * @return the metadata of the file
+     */
+    public FileMetadata initFileUpload (String filename,
                                             long totalSizeBytes,
                                             int chunkSizeBytes) {
 
@@ -134,13 +145,13 @@ public class CoordinatorServer {
             return metadata;
         }
 
-        /**
-         * Handles FILES_COMMIT. Marks file COMPLETE.
-         *
-         * @param fileId identifier for the file being committed
-         * @return true if successfully committed, else false.
-         */
-        public boolean commitFile (String fileId){
+    /**
+     * Handles FILES_COMMIT. Marks file COMPLETE.
+     *
+     * @param fileId identifier for the file being committed
+     * @return true if successfully committed, else false.
+     */
+    public boolean commitFile (String fileId){
 
             // TEMPORARY DEBUGGER START
             System.out.println("commitFile called for: " + fileId);
@@ -163,6 +174,15 @@ public class CoordinatorServer {
             return true;
         }
 
+    /**
+     * Handles NODE_REGISTER.
+     *
+     * @param nodeId nodes unique identifier
+     * @param host server host
+     * @param port servers data port
+     * @param capacityBytes the nodes storage capacity in bytes
+     * @return true if node registered with CoordinatorServer successfully
+     */
         public boolean registerNode(String nodeId, String host, int port, long capacityBytes) {
             long now =  System.currentTimeMillis();
 
@@ -177,6 +197,13 @@ public class CoordinatorServer {
             return true;
         }
 
+    /**
+     * Handle NODE_HEARTBEAT.
+     *
+     * @param nodeId unique identifier for the node that send the heartbeat message
+     * @param timeStampEpochMs the time stamp that the heartbeat was sent by the node
+     * @return true if heartbeat is successfully updated for that nodes NodeInfo registry, else false
+     */
         public boolean handleHeartbeat(String nodeId, long timeStampEpochMs) {
             NodeInfo node = nodes.get(nodeId); // Retrieve node by its ID
             if (node == null) {
@@ -188,7 +215,7 @@ public class CoordinatorServer {
             return true;
         }
 
-    /** @return the first UP node it finds in the node registry */
+    /** @return the first node with the status "UP" it can find in the node registry */
     public NodeInfo getAnyActiveNode() {
             for (NodeInfo node : nodes.values()) {
                 if (node.getStatus() == NodeInfo.Status.UP) return node;

@@ -1,5 +1,8 @@
 package com.leo.dfss.protocol;
 
+/**
+ * Protocol message used to respond to a node register request.
+ */
 public class NodeRegisterAck {
 
     private String type = "NODE_REGISTER_ACK";

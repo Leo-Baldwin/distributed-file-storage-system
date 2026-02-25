@@ -1,7 +1,7 @@
 package com.leo.dfss.protocol;
 
 /**
- * Represents a simple message sent over TCP as JSON.
+ * Represents a simple protocol message sent over TCP as JSON.
  */
 public class Message {
     private String type;

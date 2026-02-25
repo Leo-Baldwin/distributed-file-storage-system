@@ -1,7 +1,7 @@
 package com.leo.dfss.protocol;
 
 /**
- * Typed protocol message for uploading a chunk to a node.
+ * Protocol message for uploading a chunk to a node.
  */
 public class ChunkUploadRequest {
 

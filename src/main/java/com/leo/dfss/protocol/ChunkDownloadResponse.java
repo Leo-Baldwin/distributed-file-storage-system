@@ -1,5 +1,8 @@
 package com.leo.dfss.protocol;
 
+/**
+ * Response sent by a Node after a chunk download request has been processed.
+ */
 public class ChunkDownloadResponse {
     private String status;
     private String message;

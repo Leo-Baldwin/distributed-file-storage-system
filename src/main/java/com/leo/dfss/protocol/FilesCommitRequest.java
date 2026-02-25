@@ -1,5 +1,8 @@
 package com.leo.dfss.protocol;
 
+/**
+ * Protocol message sent to Coordinator to request a file commit.
+ */
 public class FilesCommitRequest {
     private String type = "FILES_COMMIT";
     private String fileId;

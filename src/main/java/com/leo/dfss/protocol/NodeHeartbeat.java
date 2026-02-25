@@ -1,5 +1,8 @@
 package com.leo.dfss.protocol;
 
+/**
+ * Protocol message used to ping a server for a heartbeat to check its status.
+ */
 public class NodeHeartbeat {
 
     private String type = "NODE_HEARTBEAT";
