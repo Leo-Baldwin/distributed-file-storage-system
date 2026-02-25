@@ -11,6 +11,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
 
+/**
+ * Handles the operations required to complete the full upload of a file, including initiating the upload,
+ * uploading chunks to nodes, and committing the upload with the CoordinatorServer.
+ */
 public class UploadOrchestratorClient {
 
     private static final Gson gson = new Gson();
