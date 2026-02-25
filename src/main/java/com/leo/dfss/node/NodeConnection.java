@@ -2,7 +2,6 @@ package com.leo.dfss.node;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
-import com.leo.dfss.domain.ChunkStore;
 import com.leo.dfss.protocol.*;
 import com.leo.dfss.transport.ReceivedMessage;
 import com.leo.dfss.transport.TcpMessageReader;

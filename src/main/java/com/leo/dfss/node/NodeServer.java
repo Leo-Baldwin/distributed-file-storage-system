@@ -1,7 +1,6 @@
 package com.leo.dfss.node;
 
 import com.google.gson.Gson;
-import com.leo.dfss.domain.ChunkStore;
 import com.leo.dfss.protocol.Message;
 import com.leo.dfss.protocol.NodeHeartbeat;
 import com.leo.dfss.protocol.NodeRegisterRequest;

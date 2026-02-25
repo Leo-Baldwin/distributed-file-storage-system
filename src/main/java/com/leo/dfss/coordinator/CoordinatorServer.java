@@ -1,8 +1,5 @@
 package com.leo.dfss.coordinator;
 
-import com.leo.dfss.domain.FileMetadata;
-import com.leo.dfss.domain.NodeInfo;
-
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;

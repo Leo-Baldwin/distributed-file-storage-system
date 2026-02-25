@@ -3,7 +3,6 @@ package com.leo.dfss.coordinator;
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
 
-import com.leo.dfss.domain.*;
 import com.leo.dfss.protocol.*;
 import com.leo.dfss.transport.*;
 
