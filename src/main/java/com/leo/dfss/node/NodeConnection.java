@@ -11,7 +11,17 @@ import java.io.IOException;
 import java.net.Socket;
 
 /**
- * Handles a single node connection in its own thread.
+ * Per-connection handler for a NodeServer.
+ *
+ * Responsibilities:
+ * - Reads framed protocol messages from a single TCP client.
+ * - Handles chunk upload and download requests.
+ * - Interacts with {@link ChunkStore} for disk persistence.
+ * - Sends structured protocol responses back to the client.
+ *
+ * Threading model:
+ * - One instance of this class runs per TCP connection.
+ * - Extends {@link Thread} so each connection is handled independently.
  */
 public class NodeConnection extends Thread {
 
@@ -23,6 +33,13 @@ public class NodeConnection extends Thread {
 
     private volatile boolean running = true;
 
+    /**
+     * Creates a new NodeConnection handler.
+     *
+     * @param socket        connected client socket
+     * @param connectionId  identifier used for logging/debugging
+     * @param chunkStore    storage component responsible for chunk persistence
+     */
     public NodeConnection(Socket socket, int connectionId, ChunkStore chunkStore) {
         this.socket = socket;
         this.connectionId = connectionId;
@@ -38,10 +55,11 @@ public class NodeConnection extends Thread {
             TcpMessageReader reader = new TcpMessageReader(socket.getInputStream());
             TcpMessageWriter writer = new TcpMessageWriter(socket.getOutputStream());
 
-            // Great client
+            // Greet client with initial welcome message
             writer.send(new Message("WELCOME", "Node connection " + connectionId + " configured."), null);
 
             while (running) {
+                // Read the next framed protocol message from the client
                 ReceivedMessage received = reader.read();
                 if (received == null) {
                     System.out.println("Client disconnected.");
@@ -58,6 +76,7 @@ public class NodeConnection extends Thread {
 
                 String type = header.getType();
 
+                // Dispatch to appropriate handler based on message type
                 switch (type) {
                     case "PING":
                         writer.send(new Message("PONG", "Pong (node connection: " + connectionId + ")"), null);
@@ -84,6 +103,7 @@ public class NodeConnection extends Thread {
         } catch (IOException e) {
             System.out.println("Node connection error: " + e.getMessage());
         } finally {
+            // Ensure socket resources are released when connection terminates
             try {
                 socket.close();
             } catch (IOException ignore) {
@@ -92,6 +112,10 @@ public class NodeConnection extends Thread {
         }
     }
 
+    /**
+     * Handles CHUNK_UPLOAD messages.
+     * Validates metadata and writes the received chunk bytes to disk via ChunkStore.
+     */
     private void handleChunkUpload(Message header, byte[] body, TcpMessageWriter writer) throws IOException {
         String data = header.getData();
         if (data == null) {
@@ -123,12 +147,13 @@ public class NodeConnection extends Thread {
             return;
         }
 
+        // Validate that binary body matches declared bodyLength in header
         if (body == null || body.length != request.getBodyLength()) {
             writer.send(new Message("ERROR", "Body length does not match length specified in header"), null);
             return;
         }
 
-        // Write chunk bytes to disk
+        // Persist chunk bytes to disk using ChunkStore abstraction
         try {
             chunkStore.writeChunk(request.getFileId(), request.getChunkIndex(), body);
         } catch (Exception e) {
@@ -143,7 +168,7 @@ public class NodeConnection extends Thread {
             return;
         }
 
-        // Acknowledge chunk upload success
+        // Acknowledge successful chunk persistence
         ChunkUploadAck ack = new ChunkUploadAck();
         ack.setFileId(request.getFileId());
         ack.setChunkIndex(request.getChunkIndex());
@@ -153,6 +178,10 @@ public class NodeConnection extends Thread {
         writer.send(new Message("CHUNK_UPLOAD_ACK", gson.toJson(ack)), null);
     }
 
+    /**
+     * Handles CHUNK_DOWNLOAD messages.
+     * Reads the requested chunk from disk and returns it to the client.
+     */
     private void handleChunkDownload(Message header, byte[] body, TcpMessageWriter writer) throws IOException {
         String data = header.getData();
 
@@ -169,6 +198,7 @@ public class NodeConnection extends Thread {
             return;
         }
 
+        // Read requested chunk bytes from disk
         byte[] chunkBytes;
         try {
             chunkBytes = chunkStore.readChunk(
@@ -190,12 +220,16 @@ public class NodeConnection extends Thread {
         response.setMessage("Chunk read");
         response.setBodyLength(chunkBytes.length);
 
+        // Send metadata header + raw binary chunk bytes back to client
         writer.send(new Message(
                 "CHUNK_DOWNLOAD_RESPONSE",
                 gson.toJson(response)),
                 chunkBytes);
     }
 
+    /**
+     * Signals this connection thread to terminate and closes the underlying socket.
+     */
     public void shutdown() {
         this.running = false;
         try {

@@ -9,11 +9,16 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 
 /**
- * Writes framed messages to a TCP stream using following format:
+ * Writes framed protocol messages to a TCP byte stream.
  *
- * [4 bytes]    = header length (int)
- * [N bytes]    = JSON header (UTF-8) containing metadata about message, where N = header length
- * [N bytes]    = optional body bytes, where N = body length embedded in JSON header metadata
+ * Framing format:
+ * <pre>
+ *   [4 bytes] headerLength
+ *   [N bytes] header JSON (UTF-8), where N = headerLength
+ *   [M bytes] optional body bytes, where M = bodyLength declared in the header
+ * </pre>
+ *
+ * This class is the symmetrical counterpart to {@link TcpMessageReader}.
  */
 public class TcpMessageWriter {
 
@@ -21,31 +26,47 @@ public class TcpMessageWriter {
 
     private final DataOutputStream out;
 
+    /**
+     * Creates a writer that sends framed messages to the given OutputStream.
+     *
+     * @param outputStream underlying TCP socket output stream
+     */
     public TcpMessageWriter(OutputStream outputStream) {
         this.out = new DataOutputStream(outputStream);
     }
 
+    /**
+     * Serialises and writes a framed message to the stream.
+     *
+     * @param header protocol header (will have bodyLength populated automatically)
+     * @param body   optional binary payload (may be null)
+     * @throws IOException if writing to the stream fails
+     */
     public void send(Message header, byte[] body) throws IOException {
+        if (header == null) {
+            throw new IllegalArgumentException("Header cannot be null");
+        }
+
         int bodyLength = (body != null) ? body.length : 0;
         header.setBodyLength(bodyLength);
 
-        // Serialise header JSON to bytes
+        // 1) Serialise header object to JSON bytes
         String headerString = GSON.toJson(header);
         byte[] headerBytes = headerString.getBytes(StandardCharsets.UTF_8);
         int headerLength = headerBytes.length;
 
-        // 1) Write the 4-byte header length
+        // 2) Write 4-byte header length prefix
         out.writeInt(headerLength);
 
-        // 2) Write the header bytes
+        // 3) Write header JSON bytes
         out.write(headerBytes);
 
-        // 3) Write the optional body bytes
+        // 4) Write optional binary body bytes (if present)
         if (bodyLength > 0) {
             out.write(body);
         }
 
-        // Ensure all bytes are sent
+        // 5) Flush stream to ensure all framed bytes are transmitted
         out.flush();
     }
 }

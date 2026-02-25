@@ -1,5 +1,3 @@
-package com.leo.dfss.tests;
-
 import com.google.gson.Gson;
 import com.leo.dfss.protocol.FilesInitRequest;
 import com.leo.dfss.protocol.FilesInitResponse;

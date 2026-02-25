@@ -8,12 +8,20 @@ import java.util.UUID;
 import java.util.concurrent.*;
 
 /**
- * Server that accepts multiple connections and gives each one a Connection thread.
- * Keeps a live registry of client and node connections.
+ * Central coordinator (control-plane) server for the distributed file storage system.
+ *
+ * Responsibilities:
+ * - Accepts TCP connections and delegates each connection to a {@link CoordinatorConnection} thread.
+ * - Maintains in-memory file metadata (no file bytes are stored here).
+ * - Maintains an in-memory registry of active storage nodes and their heartbeat status.
+ *
+ * Threading model:
+ * - One thread per client connection (CoordinatorConnection).
+ * - A single scheduled sweeper thread marks nodes DOWN if heartbeats time out.
  */
 public class CoordinatorServer {
 
-    public final int port;
+    private final int port; // TCP port this CoordinatorServer listens on
 
     // Global file registry: fileId -> FileMetadata
     private final Map<String, FileMetadata> files = new ConcurrentHashMap<>();
@@ -37,204 +45,200 @@ public class CoordinatorServer {
         this.port = port;
     }
 
-        public static void main (String[]args){
-            new CoordinatorServer(9000).start();
-        }
-
-        public void start () {
-            System.out.println("Starting CoordinatorServer...");
-
-            // Try-with resources to ensure automatic closure of connection
-            try (ServerSocket serverSocket = new ServerSocket(port)) {
-                System.out.println("CoordinatorServer listening on port: " + port);
-
-                startNodeSweeper();
-
-                int nextConnectionId = 1;
-
-                while (running) {
-                    // Blocks until client connects
-                    Socket socket = serverSocket.accept();
-                    System.out.println("Accepted connected from " + socket.getRemoteSocketAddress());
-
-                    // Initialises new connection thread with a client socket, unique identifier and CoordinatorServer
-                    CoordinatorConnection connection =
-                            new CoordinatorConnection(socket, nextConnectionId++, this);
-
-                    // Adds new connection thread to global connections registry and starts the thread
-                    connections.add(connection);
-                    connection.start();
-                }
-
-            } catch (IOException e) {
-                if (running) {
-                    e.printStackTrace();
-                } else {
-                    System.out.println("CoordinatorServer stopped.");
-                }
-            } finally {
-                sweeper.shutdownNow();
-                shutdownAllConnections();
-            }
-        }
+    public static void main(String[] args) {
+        new CoordinatorServer(9000).start();
+    }
 
     /**
-     * Method used to iterate through all threads in the connections list and shut them down.
-     * Once all connections are closed the global registry is cleared.
+     * Starts the Coordinator server accept loop and the node heartbeat sweeper.
+     * This method blocks until the server is stopped or an unrecoverable I/O error occurs.
      */
-    public void shutdownAllConnections () {
-            System.out.println("Shutting down all connections...");
-            for (CoordinatorConnection connection : connections) {
-                connection.shutdown();
+    public void start() {
+        System.out.println("Starting CoordinatorServer...");
+
+        // Try-with-resources ensures the ServerSocket is closed when the server stops
+        try (ServerSocket serverSocket = new ServerSocket(port)) {
+            System.out.println("CoordinatorServer listening on port: " + port);
+
+            startNodeSweeper();
+
+            int nextConnectionId = 1;
+
+            while (running) {
+                // Blocks until a client connects
+                Socket socket = serverSocket.accept();
+                System.out.println("Accepted connection from " + socket.getRemoteSocketAddress());
+
+                // Create a per-connection handler thread (one thread per client socket)
+                CoordinatorConnection connection =
+                        new CoordinatorConnection(socket, nextConnectionId++, this);
+
+                // Track and start the connection handler thread
+                connections.add(connection);
+                connection.start();
             }
-            connections.clear();
+
+        } catch (IOException e) {
+            if (running) {
+                e.printStackTrace();
+            } else {
+                System.out.println("CoordinatorServer stopped.");
+            }
+        } finally {
+            sweeper.shutdownNow();
+            shutdownAllConnections();
         }
+    }
 
     /**
-     * Begins a sweeper that periodically checks for a nodes heartbeat, if no heartbeat is detected
-     * for more than 15 seconds then it will mark the Nodes status as DOWN.
+     * Shuts down all active {@link CoordinatorConnection} threads and clears the in-memory connection registry.
+     */
+    public void shutdownAllConnections() {
+        System.out.println("Shutting down all connections...");
+        for (CoordinatorConnection connection : connections) {
+            connection.shutdown();
+        }
+        connections.clear();
+    }
+
+    /**
+     * Starts a periodic sweeper that checks node heartbeats.
+     * If a node has not been seen for {@link #HEARTBEAT_TIMEOUT_MS} milliseconds it is marked DOWN.
      */
     private void startNodeSweeper() {
-            sweeper.scheduleAtFixedRate(() -> {
-                long now = System.currentTimeMillis();
+        sweeper.scheduleAtFixedRate(() -> {
+            long now = System.currentTimeMillis();
 
-                for (NodeInfo node : nodes.values()) {
-                    long age = now - node.getLastSeenEpochMs();
+            for (NodeInfo node : nodes.values()) {
+                long age = now - node.getLastSeenEpochMs();
 
-                    if (node.getStatus() == NodeInfo.Status.UP && age > HEARTBEAT_TIMEOUT_MS) {
-                        node.markDown();
-                        System.out.println("Node " + node.getNodeId() + " is DOWN");
-                    }
+                if (node.getStatus() == NodeInfo.Status.UP && age > HEARTBEAT_TIMEOUT_MS) {
+                    node.markDown();
+                    System.out.println("Node " + node.getNodeId() + " is DOWN");
                 }
-            }, SWEEP_INTERVAL_MS, SWEEP_INTERVAL_MS, TimeUnit.MILLISECONDS);
-        }
+            }
+        }, SWEEP_INTERVAL_MS, SWEEP_INTERVAL_MS, TimeUnit.MILLISECONDS);
+    }
 
     /**
-     * Handles the FILES_INIT_REQUEST command. Creates a new file record and returns the metadata.
+     * Creates a new in-memory file metadata record and assigns it to an active Node.
      *
      * @param filename       name of the file
      * @param totalSizeBytes total size of the file
      * @param chunkSizeBytes size of each chunk
      * @return the metadata of the file
      */
-    public FileMetadata initFileUpload (String filename,
-                                            long totalSizeBytes,
-                                            int chunkSizeBytes) {
+    public FileMetadata initFileUpload(String filename,
+                                       long totalSizeBytes,
+                                       int chunkSizeBytes) {
 
-            NodeInfo node = getAnyActiveNode();
-            if (node == null) {
-                throw new IllegalStateException("No active storage nodes available");
-            }
-
-            String fileId = UUID.randomUUID().toString();
-
-            FileMetadata metadata =
-                    new FileMetadata(fileId, filename, totalSizeBytes, chunkSizeBytes);
-
-            metadata.setStatus(FileMetadata.Status.UPLOADING);
-
-            metadata.setStorageHost(node.getHost());
-            metadata.setStoragePort(node.getPort());
-
-            files.put(fileId, metadata);
-
-            System.out.println("New file record created: " + metadata);
-            return metadata;
+        NodeInfo node = getAnyActiveNode();
+        if (node == null) {
+            throw new IllegalStateException("No active storage nodes available");
         }
 
+        String fileId = UUID.randomUUID().toString();
+
+        FileMetadata metadata =
+                new FileMetadata(fileId, filename, totalSizeBytes, chunkSizeBytes);
+
+        metadata.setStatus(FileMetadata.Status.UPLOADING);
+
+        metadata.setStorageHost(node.getHost());
+        metadata.setStoragePort(node.getPort());
+
+        files.put(fileId, metadata);
+
+        System.out.println("New file record created: " + metadata);
+        return metadata;
+    }
+
     /**
-     * Handles FILES_COMMIT. Marks file COMPLETE.
+     * Handles FILES_COMMIT by marking the file metadata record as COMPLETE.
      *
      * @param fileId identifier for the file being committed
      * @return true if successfully committed, else false.
      */
-    public boolean commitFile (String fileId){
+    public boolean commitFile(String fileId) {
 
-            // TEMPORARY DEBUGGER START
-            System.out.println("commitFile called for: " + fileId);
-            FileMetadata m = files.get(fileId);
-            System.out.println("metadata status BEFORE = " + (m == null ? "null" : m.getStatus()));
-            // DEBUG END
-
-            FileMetadata metadata = files.get(fileId);
-            if (metadata == null) {
-                return false;
-            }
-
-            metadata.setStatus(FileMetadata.Status.COMPLETE);
-
-            // TEMP DEBUG
-            System.out.println("metadata status AFTER = " + m.getStatus());
-            // DEBUG END
-
-            System.out.println("Committed file record: " + metadata);
-            return true;
+        FileMetadata metadata = files.get(fileId);
+        if (metadata == null) {
+            return false;
         }
+
+        metadata.setStatus(FileMetadata.Status.COMPLETE);
+
+        System.out.println("Committed file record: " + metadata);
+        return true;
+    }
 
     /**
      * Handles NODE_REGISTER.
      *
-     * @param nodeId nodes unique identifier
-     * @param host server host
-     * @param port servers data port
+     * @param nodeId        nodes unique identifier
+     * @param host          server host
+     * @param port          servers data port
      * @param capacityBytes the nodes storage capacity in bytes
      * @return true if node registered with CoordinatorServer successfully
      */
-        public boolean registerNode(String nodeId, String host, int port, long capacityBytes) {
-            long now =  System.currentTimeMillis();
+    public boolean registerNode(String nodeId, String host, int port, long capacityBytes) {
+        long now = System.currentTimeMillis();
 
-            if (nodeId == null || nodeId.isBlank()) return false;
-            if (host == null || host.isBlank()) return false;
-            if (port <= 0) return false;
+        if (nodeId == null || nodeId.isBlank()) return false;
+        if (host == null || host.isBlank()) return false;
+        if (port <= 0) return false;
 
-            NodeInfo node = new NodeInfo(nodeId, host, port, capacityBytes, now);
-            nodes.put(nodeId, node);
+        NodeInfo node = new NodeInfo(nodeId, host, port, capacityBytes, now);
+        nodes.put(nodeId, node);
 
-            System.out.println("Node " + node.getNodeId() + " is registered");
-            return true;
-        }
+        System.out.println("Node " + node.getNodeId() + " is registered");
+        return true;
+    }
 
     /**
-     * Handle NODE_HEARTBEAT.
+     * Handles NODE_HEARTBEAT.
      *
-     * @param nodeId unique identifier for the node that send the heartbeat message
-     * @param timeStampEpochMs the time stamp that the heartbeat was sent by the node
+     * @param nodeId           unique identifier for the node that sent the heartbeat message
+     * @param timeStampEpochMs the timestamp that the heartbeat was sent by the node
      * @return true if heartbeat is successfully updated for that nodes NodeInfo registry, else false
      */
-        public boolean handleHeartbeat(String nodeId, long timeStampEpochMs) {
-            NodeInfo node = nodes.get(nodeId); // Retrieve node by its ID
-            if (node == null) {
-                return false; // node cannot be retrieved
-            }
-
-            node.updateHeartbeat(timeStampEpochMs);
-            System.out.println("Heartbeat from node " + nodeId + " at " + timeStampEpochMs);
-            return true;
+    public boolean handleHeartbeat(String nodeId, long timeStampEpochMs) {
+        NodeInfo node = nodes.get(nodeId); // Retrieve node by its ID
+        if (node == null) {
+            return false; // node cannot be retrieved
         }
 
-    /** @return the first node with the status "UP" it can find in the node registry */
-    public NodeInfo getAnyActiveNode() {
-            for (NodeInfo node : nodes.values()) {
-                if (node.getStatus() == NodeInfo.Status.UP) return node;
-            }
-            return null;
-        }
-
-        /**
-         * Method to inspect all current nodes.
-         *
-         * @return node registry
-         */
-        public Map<String, NodeInfo> getNodes() {
-            return nodes;
-        }
-
-        /** Method to lookup metadata of file by fileId.
-         *
-         * @param fileId identifier of file being retrieved
-         * @return the metadata of specified file
-         */
-        public FileMetadata getFile (String fileId) {
-            return files.get(fileId);
-        }
+        node.updateHeartbeat(timeStampEpochMs);
+        System.out.println("Heartbeat from node " + nodeId + " at " + timeStampEpochMs);
+        return true;
     }
+
+    /**
+     * Returns the first Node in the registry that is currently marked {@code UP}.
+     */
+    public NodeInfo getAnyActiveNode() {
+        for (NodeInfo node : nodes.values()) {
+            if (node.getStatus() == NodeInfo.Status.UP) return node;
+        }
+        return null;
+    }
+
+    /**
+     * Returns the current in-memory node registry.
+     *
+     * @return map of nodeId to {@link NodeInfo}
+     */
+    public Map<String, NodeInfo> getNodes() {
+        return nodes;
+    }
+
+    /**
+     * Method to lookup metadata of file by fileId.
+     *
+     * @param fileId identifier of file being retrieved
+     * @return the metadata of specified file
+     */
+    public FileMetadata getFile(String fileId) {
+        return files.get(fileId);
+    }
+}

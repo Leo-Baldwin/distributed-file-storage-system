@@ -10,8 +10,17 @@ import java.io.IOException;
 import java.net.Socket;
 
 /**
- * Handles a single client connection in its own thread.
- * Reads framed messages and delegates operations to CoordinatorServer
+ * Per-connection handler for the CoordinatorServer.
+ *
+ * Responsibilities:
+ * - Reads framed protocol messages from a single TCP client.
+ * - Validates and deserialises request payloads (JSON header data).
+ * - Delegates business logic to {@link CoordinatorServer}.
+ * - Sends structured protocol responses back to the client.
+ *
+ * Threading model:
+ * - One instance of this class runs per TCP connection.
+ * - Extends {@link Thread} so each connection is handled independently.
  */
 public class CoordinatorConnection extends Thread {
 
@@ -24,11 +33,11 @@ public class CoordinatorConnection extends Thread {
     private static final Gson gson = new Gson();
 
     /**
-     * Initialises a new CoordinatorConnection thread.
+     * Creates a new per-connection handler.
      *
-     * @param socket
-     * @param connectionId
-     * @param coordinator
+     * @param socket        connected client socket
+     * @param connectionId  unique identifier used for logging
+     * @param coordinator   reference to the central CoordinatorServer
      */
     public CoordinatorConnection(Socket socket, int connectionId, CoordinatorServer coordinator) {
         this.socket = socket;
@@ -44,10 +53,11 @@ public class CoordinatorConnection extends Thread {
             TcpMessageReader reader = new TcpMessageReader(socket.getInputStream());
             TcpMessageWriter writer = new  TcpMessageWriter(socket.getOutputStream());
 
+            // Send initial welcome message so client knows connection is established
             writer.send(new Message("WELCOME", "Connection " + connectionId + " ready."), null);
 
             while (running) {
-                // Reads the protocol message coming from the client
+                // Read the next framed protocol message from the client
                 ReceivedMessage receivedMessage = reader.read();
                 if  (receivedMessage == null) {
                     System.out.println("[" + connectionId + "] Client disconnected.");
@@ -63,7 +73,7 @@ public class CoordinatorConnection extends Thread {
 
                 String type = header.getType();
 
-                // Switch statement calls the appropriate method for handling the received protocol message depending on its type
+                // Call the appropriate handler method based on message type
                 switch (type) {
                     case "FILES_INIT_REQUEST":
                         handleFilesInit(header, writer);
@@ -93,6 +103,7 @@ public class CoordinatorConnection extends Thread {
         } catch (IOException e) {
             System.out.println("[" + connectionId + "] Connection error: " + e.getMessage());
         } finally {
+            // Ensure socket resources are released when the connection terminates
             try {
                 socket.close();
             } catch (IOException e) {
@@ -102,6 +113,11 @@ public class CoordinatorConnection extends Thread {
         System.out.println("Connection " + connectionId + " closed.");
     }
 
+    /**
+     * Handles FILES_INIT_REQUEST.
+     * Validates request fields and creates a new in-memory file metadata record
+     * via the Coordinator before returning upload location details.
+     */
     private void handleFilesInit(Message header, TcpMessageWriter writer) throws IOException {
         String data = header.getData();
 
@@ -162,6 +178,10 @@ public class CoordinatorConnection extends Thread {
                 null);
     }
 
+    /**
+     * Handles FILES_COMMIT.
+     * Marks the file as COMPLETE in the Coordinator if the fileId exists.
+     */
     private void handleFilesCommit(Message header, TcpMessageWriter writer) throws IOException {
         String data = header.getData();
 
@@ -205,7 +225,7 @@ public class CoordinatorConnection extends Thread {
         FilesCommitAck ack = new FilesCommitAck();
         ack.setFileId(request.getFileId());
         ack.setStatus("OK");
-        ack.setMessage("FIle commited successfully");
+        ack.setMessage("File committed successfully");
 
         writer.send(new Message(
                 "FILES_COMMIT_ACK",
@@ -213,6 +233,11 @@ public class CoordinatorConnection extends Thread {
                 null);
     }
 
+    /**
+     * Handles FILES_GET_REQUEST.
+     * Returns file metadata and download location if the file exists and
+     * has reached the COMPLETE lifecycle state.
+     */
     private void handleFilesGet(Message header, TcpMessageWriter writer) throws IOException {
         String data = header.getData();
 
@@ -241,6 +266,7 @@ public class CoordinatorConnection extends Thread {
             return;
         }
 
+        // Enforce lifecycle: only allow download if file has been fully committed
         if (metadata.getStatus() != FileMetadata.Status.COMPLETE) {
             writer.send(new Message("ERROR", "File is not committed yet"), null);
             return;
@@ -257,6 +283,10 @@ public class CoordinatorConnection extends Thread {
         writer.send(new Message("FILES_GET_RESPONSE", gson.toJson(response)), null);
     }
 
+    /**
+     * Handles NODE_REGISTER.
+     * Registers a storage node with the Coordinator's in-memory registry.
+     */
     private void handleNodeRegister(Message header, TcpMessageWriter writer) throws java.io.IOException {
         String data = header.getData();
         if (data == null) {
@@ -303,6 +333,10 @@ public class CoordinatorConnection extends Thread {
         writer.send(new Message("NODE_REGISTER_ACK", gson.toJson(ack)), null);
     }
 
+    /**
+     * Handles NODE_HEARTBEAT.
+     * Updates the last-seen timestamp for a registered node.
+     */
     private void handleNodeHeartbeat(Message header, TcpMessageWriter writer) throws java.io.IOException {
         String data = header.getData();
         if (data == null) {
@@ -343,6 +377,7 @@ public class CoordinatorConnection extends Thread {
     }
 
     public void shutdown() {
+        // Signal the run loop to terminate
         running = false;
         try {
             socket.close();

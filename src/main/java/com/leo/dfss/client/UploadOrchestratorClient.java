@@ -12,15 +12,21 @@ import java.nio.file.Path;
 import java.util.Arrays;
 
 /**
- * Handles the operations required to complete the full upload of a file, including initiating the upload,
- * uploading chunks to nodes, and committing the upload with the CoordinatorServer.
+ * Client-side upload orchestrator.
+ *
+ * Responsibilities:
+ * - Reads a local file and splits it into fixed-size chunks.
+ * - Contacts the Coordinator to initialise the upload and obtain the target Node location.
+ * - Uploads each chunk to the Node using CHUNK_UPLOAD (header + binary body).
+ * - Commits the upload with the Coordinator so the file becomes downloadable.
+ *
  */
 public class UploadOrchestratorClient {
 
     private static final Gson gson = new Gson();
 
-    private final String coordinatorHost = "localhost";
-    private final int coordinatorPort = 9000;
+    private final String coordinatorHost = "localhost"; // Coordinator host (control-plane)
+    private final int coordinatorPort = 9000; // Coordinator port (control-plane)
 
     public static void main(String[] args) {
         if (args.length != 1) {
@@ -32,6 +38,11 @@ public class UploadOrchestratorClient {
         new UploadOrchestratorClient().uploadFile(filePath);
     }
 
+    /**
+     * Performs a full upload workflow for the given file.
+     *
+     * @param filePath path to the local file to upload
+     */
     public void uploadFile(Path filePath) {
         long fileSize;
         String fileName;
@@ -40,12 +51,12 @@ public class UploadOrchestratorClient {
             fileSize = Files.size(filePath);
             fileName = filePath.getFileName().toString();
         } catch (Exception e) {
-            throw new RuntimeException("Failed to read file metadata. " + e);
+            throw new RuntimeException("Failed to read file metadata", e);
         }
 
-        System.out.println("Uploading file: " + fileName + ". File size: " + fileSize + "bytes.");
+        System.out.println("Uploading file: " + fileName + " (" + fileSize + " bytes)");
 
-        int chunkSizeBytes = 4096; // fixed (4KB)
+        int chunkSizeBytes = 4096; // Fixed chunk size (4 KB) for this prototype
 
         FilesInitResponse init = initUploadWithCoordinator(fileName, fileSize, chunkSizeBytes);
 
@@ -71,8 +82,12 @@ public class UploadOrchestratorClient {
         }
     }
 
-    private FilesInitResponse initUploadWithCoordinator (
-            String FileName,
+    /**
+     * Sends FILES_INIT_REQUEST to the Coordinator to create a new file record and obtain
+     * the Node upload destination.
+     */
+    private FilesInitResponse initUploadWithCoordinator(
+            String fileName,
             long fileSize,
             int chunkSizeBytes
     ) {
@@ -83,12 +98,12 @@ public class UploadOrchestratorClient {
             // Read welcome message from coordinator server
             ReceivedMessage welcome = reader.read();
             if (welcome != null && welcome.getHeader() != null) {
-                System.out.println("Coordinator: " + welcome.getHeader().getType() + " " + welcome.getHeader().getData());
+                System.out.println("Coordinator -> " + welcome.getHeader().getType() + " " + welcome.getHeader().getData());
             }
 
             // Build typed request
             FilesInitRequest request = new FilesInitRequest();
-            request.setFilename(FileName);
+            request.setFilename(fileName);
             request.setTotalSizeBytes(fileSize);
             request.setChunkSizeBytes(chunkSizeBytes);
             request.setBodyLength(0);
@@ -118,6 +133,10 @@ public class UploadOrchestratorClient {
         }
     }
 
+    /**
+     * Debug helper that chunks the file locally and prints the number/size of chunks.
+     * This is useful to verify the local chunking logic matches the Coordinator plan.
+     */
     private void debugChunkFile(Path filePath, int chunkSizeBytes, int expectedTotalChunks) {
         System.out.println("\n--- Local chunking (debug) ---");
         System.out.println("chunkSizeBytes = " + chunkSizeBytes);
@@ -155,6 +174,9 @@ public class UploadOrchestratorClient {
         }
     }
 
+    /**
+     * Uploads all chunks of the file directly to the Node provided by the Coordinator.
+     */
     private void uploadChunksToNode(
             Path filePath,
             FilesInitResponse init
@@ -168,6 +190,7 @@ public class UploadOrchestratorClient {
 
         int chunkIndex = 0;
 
+        // Stream the file and upload each chunk sequentially
         try (var in = Files.newInputStream(filePath)) {
             byte[] buffer = new byte[chunkSizeBytes];
 
@@ -179,13 +202,13 @@ public class UploadOrchestratorClient {
 
                 byte[] chunkBytes = Arrays.copyOf(buffer, bytesRead);
 
-                // Build chunk upload header
+                // Build CHUNK_UPLOAD request header (declares bodyLength)
                 ChunkUploadRequest req = new ChunkUploadRequest();
                 req.setFileId(fileId);
                 req.setChunkIndex(chunkIndex);
                 req.setBodyLength(chunkBytes.length);
 
-                // Connect to NodeServer for this chunk
+                // Connect to the Node for this chunk upload
                 try (Socket socket = new Socket(host, port)) {
                     TcpMessageReader reader = new TcpMessageReader(socket.getInputStream());
                     TcpMessageWriter writer = new TcpMessageWriter(socket.getOutputStream());
@@ -202,7 +225,7 @@ public class UploadOrchestratorClient {
                             chunkBytes
                     );
 
-                    // Read ACK
+                    // Read CHUNK_UPLOAD_ACK
                     ReceivedMessage resp = reader.read();
                     if (resp == null || resp.getHeader() == null) {
                         throw new RuntimeException("Node closed connection without ACK");
@@ -233,6 +256,9 @@ public class UploadOrchestratorClient {
         System.out.println("All chunks uploaded successfully.");
     }
 
+    /**
+     * Sends FILES_COMMIT to the Coordinator to mark the file COMPLETE.
+     */
     private FilesCommitAck commitUploadWithCoordinator(String fileId) {
         try (Socket socket = new Socket(coordinatorHost, coordinatorPort)) {
             TcpMessageReader reader = new TcpMessageReader(socket.getInputStream());

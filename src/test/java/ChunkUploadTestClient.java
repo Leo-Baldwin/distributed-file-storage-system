@@ -1,5 +1,3 @@
-package com.leo.dfss.tests;
-
 import com.google.gson.Gson;
 import com.leo.dfss.protocol.ChunkUploadRequest;
 import com.leo.dfss.protocol.Message;
