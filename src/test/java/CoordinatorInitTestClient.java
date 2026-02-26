@@ -16,7 +16,7 @@ public class CoordinatorInitTestClient {
     private static final int COORDINATOR_PORT = 9000;
 
     public static void main(String[] args) {
-        // Hard-coded test values (we’ll use real file values in the orchestrator later)
+        // Hard-coded test values
         String filename = "example.txt";
         long totalSizeBytes = 12_345;
         int chunkSizeBytes = 4_096;

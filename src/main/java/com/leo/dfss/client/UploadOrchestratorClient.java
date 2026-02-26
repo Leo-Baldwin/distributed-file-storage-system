@@ -289,8 +289,7 @@ public class UploadOrchestratorClient {
             String data = header.getData();
 
             if ("FILES_COMMIT_ACK".equals(type)) {
-                FilesCommitAck ack = gson.fromJson(data, FilesCommitAck.class);
-                return ack;
+                return gson.fromJson(data, FilesCommitAck.class);
             }
 
             throw new RuntimeException("Coordinator returned " + type + ": " + data);
