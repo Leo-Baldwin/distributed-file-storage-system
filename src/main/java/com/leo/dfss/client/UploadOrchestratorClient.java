@@ -10,6 +10,8 @@ import java.net.Socket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Client-side upload orchestrator.
@@ -68,6 +70,9 @@ public class UploadOrchestratorClient {
         System.out.println("chunkSize   = " + init.getChunkSizeBytes());
         System.out.println("uploadHost  = " + init.getUploadHost());
         System.out.println("uploadPort  = " + init.getUploadPort());
+        if (init.getUploadTargets() != null && !init.getUploadTargets().isEmpty()) {
+            System.out.println("uploadTargets = " + init.getUploadTargets());
+        }
 
         debugChunkFile(filePath, init.getChunkSizeBytes(), init.getTotalChunks());
 
@@ -178,7 +183,12 @@ public class UploadOrchestratorClient {
     }
 
     /**
-     * Uploads all chunks of the file directly to the Node provided by the Coordinator.
+     * Uploads all chunks of the file to the Node targets provided by the Coordinator.
+     *
+     * Replication behaviour:
+     * - If the Coordinator provides multiple upload targets, each chunk is uploaded to ALL targets.
+     * - Upload uses a strict acknowledgement policy: the client requires an OK ACK from every target.
+     * - For backward compatibility, if no targets are provided, the legacy uploadHost/uploadPort is used.
      */
     private void uploadChunksToNode(
             Path filePath,
@@ -188,8 +198,17 @@ public class UploadOrchestratorClient {
 
         int chunkSizeBytes = init.getChunkSizeBytes();
         String fileId = init.getFileId();
-        String host = init.getUploadHost();
-        int port = init.getUploadPort();
+
+        // Determine where to upload chunks. Prefer replication targets, fall back to legacy host/port.
+        List<FilesInitResponse.NodeEndpoint> targets = new ArrayList<>();
+        if (init.getUploadTargets() != null && !init.getUploadTargets().isEmpty()) {
+            targets.addAll(init.getUploadTargets());
+        } else {
+            // Legacy single-target response
+            targets.add(new FilesInitResponse.NodeEndpoint("primary", init.getUploadHost(), init.getUploadPort()));
+        }
+
+        System.out.println("Replication targets (upload) = " + targets);
 
         int chunkIndex = 0;
 
@@ -211,43 +230,47 @@ public class UploadOrchestratorClient {
                 req.setChunkIndex(chunkIndex);
                 req.setBodyLength(chunkBytes.length);
 
-                // Connect to the Node for this chunk upload
-                try (Socket socket = new Socket(host, port)) {
-                    TcpMessageReader reader = new TcpMessageReader(socket.getInputStream());
-                    TcpMessageWriter writer = new TcpMessageWriter(socket.getOutputStream());
+                // Upload this chunk to ALL targets (strict ACK: every target must ACK OK)
+                for (FilesInitResponse.NodeEndpoint target : targets) {
 
-                    // Read welcome message from node server
-                    ReceivedMessage welcome = reader.read();
-                    if (welcome != null && welcome.getHeader() != null) {
-                        System.out.println("Node -> " + welcome.getHeader().getType());
+                    // Connect to the Node for this chunk upload
+                    try (Socket socket = new Socket(target.getHost(), target.getPort())) {
+                        TcpMessageReader reader = new TcpMessageReader(socket.getInputStream());
+                        TcpMessageWriter writer = new TcpMessageWriter(socket.getOutputStream());
+
+                        // Read welcome message from node server
+                        ReceivedMessage welcome = reader.read();
+                        if (welcome != null && welcome.getHeader() != null) {
+                            System.out.println("Node(" + target.getHost() + ":" + target.getPort() + ") -> " + welcome.getHeader().getType());
+                        }
+
+                        // Send CHUNK_UPLOAD (header + body)
+                        writer.send(
+                                new Message("CHUNK_UPLOAD", gson.toJson(req)),
+                                chunkBytes
+                        );
+
+                        // Read CHUNK_UPLOAD_ACK
+                        ReceivedMessage resp = reader.read();
+                        if (resp == null || resp.getHeader() == null) {
+                            throw new RuntimeException("Node closed connection without ACK (" + target + ")");
+                        }
+
+                        Message header = resp.getHeader();
+                        if (!"CHUNK_UPLOAD_ACK".equals(header.getType())) {
+                            throw new RuntimeException("Unexpected response from node (" + target + "): " +
+                                    header.getType() + " " + header.getData());
+                        }
+
+                        ChunkUploadAck ack = gson.fromJson(header.getData(), ChunkUploadAck.class);
+                        if (!"OK".equalsIgnoreCase(ack.getStatus())) {
+                            throw new RuntimeException("Chunk upload failed on (" + target + "): " + ack.getMessage());
+                        }
                     }
-
-                    // Send CHUNK_UPLOAD (header + body)
-                    writer.send(
-                            new Message("CHUNK_UPLOAD", gson.toJson(req)),
-                            chunkBytes
-                    );
-
-                    // Read CHUNK_UPLOAD_ACK
-                    ReceivedMessage resp = reader.read();
-                    if (resp == null || resp.getHeader() == null) {
-                        throw new RuntimeException("Node closed connection without ACK");
-                    }
-
-                    Message header = resp.getHeader();
-                    if (!"CHUNK_UPLOAD_ACK".equals(header.getType())) {
-                        throw new RuntimeException("Unexpected response from node: " +
-                                header.getType() + " " + header.getData());
-                    }
-
-                    ChunkUploadAck ack = gson.fromJson(header.getData(), ChunkUploadAck.class);
-                    if (!"OK".equalsIgnoreCase(ack.getStatus())) {
-                        throw new RuntimeException("Chunk upload failed: " + ack.getMessage());
-                    }
-
-                    System.out.println("Uploaded chunk " + chunkIndex +
-                            " (" + bytesRead + " bytes)");
                 }
+
+                System.out.println("Uploaded chunk " + chunkIndex +
+                        " (" + bytesRead + " bytes) to " + targets.size() + " target(s)");
 
                 chunkIndex++;
             }

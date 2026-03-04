@@ -1,5 +1,7 @@
 package com.leo.dfss.protocol;
 
+import java.util.List;
+
 public class FilesInitResponse {
 
     /**
@@ -11,6 +13,12 @@ public class FilesInitResponse {
     private int chunkSizeBytes;
     private String uploadHost;
     private int uploadPort;
+
+    /**
+     * Replication support: list of nodes where chunks should be uploaded.
+     * If present, clients should upload to ALL targets.
+     */
+    private List<NodeEndpoint> uploadTargets;
     private int bodyLength = 0;
 
     public FilesInitResponse() {
@@ -64,11 +72,69 @@ public class FilesInitResponse {
         this.uploadPort = uploadPort;
     }
 
+    public List<NodeEndpoint> getUploadTargets() {
+        return uploadTargets;
+    }
+
+    public void setUploadTargets(List<NodeEndpoint> uploadTargets) {
+        this.uploadTargets = uploadTargets;
+    }
+
     public int getBodyLength() {
         return bodyLength;
     }
 
     public void setBodyLength(int bodyLength) {
         this.bodyLength = bodyLength;
+    }
+
+    /**
+     * Lightweight node endpoint returned by the Coordinator for uploads.
+     */
+    public static class NodeEndpoint {
+        private String nodeId;
+        private String host;
+        private int port;
+
+        public NodeEndpoint() {}
+
+        public NodeEndpoint(String nodeId, String host, int port) {
+            this.nodeId = nodeId;
+            this.host = host;
+            this.port = port;
+        }
+
+        public String getNodeId() {
+            return nodeId;
+        }
+
+        public void setNodeId(String nodeId) {
+            this.nodeId = nodeId;
+        }
+
+        public String getHost() {
+            return host;
+        }
+
+        public void setHost(String host) {
+            this.host = host;
+        }
+
+        public int getPort() {
+            return port;
+        }
+
+        public void setPort(int port) {
+            this.port = port;
+        }
+
+        @Override
+        public String toString() {
+            return "NodeEndpoint{" +
+                    "nodeId='" + nodeId + '\'' +
+                    ", host='" + host + '\'' +
+                    ", port=" + port +
+                    '}';
+        }
     }
 }

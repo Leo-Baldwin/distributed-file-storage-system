@@ -20,10 +20,14 @@ class UploadDownloadRoundTripTest {
     Path tempDir;
 
     private Thread coordinatorThread;
-    private Thread nodeThread;
+    private Thread nodeThread1;
+    private Thread nodeThread2;
+    private Thread nodeThread3;
 
     private CoordinatorServer coordinator;
-    private NodeServer node;
+    private NodeServer node1;
+    private NodeServer node2;
+    private NodeServer node3;
 
     @BeforeEach
     void startServers() throws Exception {
@@ -33,12 +37,25 @@ class UploadDownloadRoundTripTest {
         coordinatorThread.setDaemon(true);
         coordinatorThread.start();
 
-        // Node on 9100, chunks stored in temp dir
-        Path nodeData = tempDir.resolve("node-data");
-        node = new NodeServer(9100, nodeData);
-        nodeThread = new Thread(node::start, "IT-Node");
-        nodeThread.setDaemon(true);
-        nodeThread.start();
+        // Nodes on 9100/9200/9300, chunks stored in separate temp directories
+        Path nodeData1 = tempDir.resolve("node-data-1");
+        Path nodeData2 = tempDir.resolve("node-data-2");
+        Path nodeData3 = tempDir.resolve("node-data-3");
+
+        node1 = new NodeServer(9100, nodeData1);
+        nodeThread1 = new Thread(node1::start, "IT-Node-1");
+        nodeThread1.setDaemon(true);
+        nodeThread1.start();
+
+        node2 = new NodeServer(9200, nodeData2);
+        nodeThread2 = new Thread(node2::start, "IT-Node-2");
+        nodeThread2.setDaemon(true);
+        nodeThread2.start();
+
+        node3 = new NodeServer(9300, nodeData3);
+        nodeThread3 = new Thread(node3::start, "IT-Node-3");
+        nodeThread3.setDaemon(true);
+        nodeThread3.start();
 
         // Give servers a moment to bind ports + for node to register
         Thread.sleep(800);
@@ -47,7 +64,9 @@ class UploadDownloadRoundTripTest {
     @AfterEach
     void stopServers() {
         // NodeServer has a shutdown() already
-        try { node.shutdown(); } catch (Exception ignored) {}
+        try { if (node1 != null) node1.shutdown(); } catch (Exception ignored) {}
+        try { if (node2 != null) node2.shutdown(); } catch (Exception ignored) {}
+        try { if (node3 != null) node3.shutdown(); } catch (Exception ignored) {}
 
         // CoordinatorServer may not have a full shutdown() accept-loop stop yet.
         // For now, rely on daemon threads ending when tests finish.

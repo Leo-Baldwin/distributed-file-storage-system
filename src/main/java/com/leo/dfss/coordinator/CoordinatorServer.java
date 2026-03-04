@@ -3,6 +3,8 @@ package com.leo.dfss.coordinator;
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.*;
@@ -32,6 +34,9 @@ public class CoordinatorServer {
     // Node heartbeat configuration
     private static final long HEARTBEAT_TIMEOUT_MS = 15_000;    // 15 seconds
     private static final long SWEEP_INTERVAL_MS = 5_000;        // 5 seconds
+
+    // Hardcoded replication factor
+    private static final int REPLICATION_FACTOR = 2;
 
     private final ScheduledExecutorService sweeper =
             Executors.newSingleThreadScheduledExecutor();
@@ -132,8 +137,8 @@ public class CoordinatorServer {
                                        long totalSizeBytes,
                                        int chunkSizeBytes) {
 
-        NodeInfo node = getAnyActiveNode();
-        if (node == null) {
+        List<NodeInfo> replicationNodes = getActiveNodesForReplication();
+        if (replicationNodes.isEmpty()) {
             throw new IllegalStateException("No active storage nodes available");
         }
 
@@ -144,13 +149,44 @@ public class CoordinatorServer {
 
         metadata.setStatus(FileMetadata.Status.UPLOADING);
 
-        metadata.setStorageHost(node.getHost());
-        metadata.setStoragePort(node.getPort());
+        // Store selected replica endpoints in metadata (file-level replication)
+        List<FileMetadata.NodeEndpoint> replicaNodes = new ArrayList<>();
+        for (NodeInfo node : replicationNodes) {
+            replicaNodes.add(new FileMetadata.NodeEndpoint(node.getNodeId(), node.getHost(), node.getPort()));
+        }
+        metadata.setReplicaNodes(replicaNodes);
+
+        // Backward compatibility: keep legacy single-node fields populated with the first replica
+        FileMetadata.NodeEndpoint primary = replicaNodes.get(0);
+        metadata.setStorageHost(primary.getHost());
+        metadata.setStoragePort(primary.getPort());
 
         files.put(fileId, metadata);
 
         System.out.println("New file record created: " + metadata);
         return metadata;
+    }
+
+    /**
+     * Returns up to REPLICATION_FACTOR active nodes for storing replicas.
+     * If fewer nodes are available than the replication factor,
+     * the method degrades gracefully and returns the available nodes.
+     */
+    public List<NodeInfo> getActiveNodesForReplication() {
+
+        List<NodeInfo> result = new ArrayList<>();
+
+        for (NodeInfo node : nodes.values()) {
+            if (node.getStatus() == NodeInfo.Status.UP) {
+                result.add(node);
+
+                if (result.size() == REPLICATION_FACTOR) {
+                    break;
+                }
+            }
+        }
+
+        return result;
     }
 
     /**

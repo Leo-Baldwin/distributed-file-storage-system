@@ -6,6 +6,9 @@ import com.google.gson.JsonSyntaxException;
 import com.leo.dfss.protocol.*;
 import com.leo.dfss.transport.*;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import java.io.IOException;
 import java.net.Socket;
 
@@ -156,22 +159,25 @@ public class CoordinatorConnection extends Thread {
                         request.getTotalSizeBytes(),
                         request.getChunkSizeBytes());
 
-        // Get active node to give as chunk upload location
-        NodeInfo node = coordinator.getAnyActiveNode();
-        if (node == null) {
-            writer.send(new Message("ERROR", "No active nodes available."), null);
-            return;
-        }
-
-
         // Respond to client with file details
         FilesInitResponse response = new FilesInitResponse();
 
         response.setFileId(meta.getFileId());
         response.setTotalChunks(meta.getTotalChunks());
         response.setChunkSizeBytes(meta.getChunkSizeBytes());
-        response.setUploadHost(node.getHost());
-        response.setUploadPort(node.getPort());
+
+        // Backward compatibility: keep legacy single upload host/port populated
+        response.setUploadHost(meta.getStorageHost());
+        response.setUploadPort(meta.getStoragePort());
+
+        // Replication: provide multiple upload targets (file-level replication)
+        List<FilesInitResponse.NodeEndpoint> targets = new ArrayList<>();
+        if (meta.getReplicaNodes() != null) {
+            for (FileMetadata.NodeEndpoint ep : meta.getReplicaNodes()) {
+                targets.add(new FilesInitResponse.NodeEndpoint(ep.getNodeId(), ep.getHost(), ep.getPort()));
+            }
+        }
+        response.setUploadTargets(targets);
 
         writer.send(new Message(
                 "FILES_INIT_RESPONSE", gson.toJson(response)),
@@ -277,8 +283,19 @@ public class CoordinatorConnection extends Thread {
         response.setFilename(metadata.getFileName());
         response.setTotalChunks(metadata.getTotalChunks());
         response.setChunkSizeBytes(metadata.getChunkSizeBytes());
+
+        // Backward compatibility: keep legacy single download host/port populated
         response.setDownloadHost(metadata.getStorageHost());
         response.setDownloadPort(metadata.getStoragePort());
+
+        // Replication: provide multiple download sources (file-level replication)
+        List<FilesGetResponse.NodeEndpoint> sources = new ArrayList<>();
+        if (metadata.getReplicaNodes() != null) {
+            for (FileMetadata.NodeEndpoint ep : metadata.getReplicaNodes()) {
+                sources.add(new FilesGetResponse.NodeEndpoint(ep.getNodeId(), ep.getHost(), ep.getPort()));
+            }
+        }
+        response.setDownloadSources(sources);
 
         writer.send(new Message("FILES_GET_RESPONSE", gson.toJson(response)), null);
     }

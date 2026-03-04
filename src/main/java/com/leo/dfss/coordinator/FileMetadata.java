@@ -1,6 +1,7 @@
 package com.leo.dfss.coordinator;
 
 import java.time.Instant;
+import java.util.List;
 
 /**
  * In-memory metadata record for a file managed by the {@link CoordinatorServer}.
@@ -33,6 +34,12 @@ public class FileMetadata {
     private final Instant createdAt;
     private String storageHost; // Hostname/IP of the Node storing this file's chunks
     private int storagePort; // TCP port of the Node storing this file's chunks
+
+    /**
+     * Replication support: list of Nodes that store replicas of this file.
+     * For now this will typically contain up to REPLICATION_FACTOR nodes.
+     */
+    private List<NodeEndpoint> replicaNodes;
 
     private volatile Status status = Status.INIT;
 
@@ -108,6 +115,14 @@ public class FileMetadata {
         this.storagePort = storagePort;
     }
 
+    public List<NodeEndpoint> getReplicaNodes() {
+        return replicaNodes;
+    }
+
+    public void setReplicaNodes(List<NodeEndpoint> replicaNodes) {
+        this.replicaNodes = replicaNodes;
+    }
+
     public Status getStatus() {
         return status;
     }
@@ -129,8 +144,60 @@ public class FileMetadata {
                 ", totalChunks=" + totalChunks +
                 ", storageHost=" + storageHost +
                 ", storagePort=" + storagePort +
+                ", replicaNodes=" + replicaNodes +
                 ", status=" + status +
                 ", createdAt=" + createdAt +
                 '}';
+    }
+
+    /**
+     * Lightweight representation of a storage Node used for replication.
+     * This avoids coupling FileMetadata directly to NodeInfo.
+     */
+    public static class NodeEndpoint {
+        private String nodeId;
+        private String host;
+        private int port;
+
+        public NodeEndpoint() {}
+
+        public NodeEndpoint(String nodeId, String host, int port) {
+            this.nodeId = nodeId;
+            this.host = host;
+            this.port = port;
+        }
+
+        public String getNodeId() {
+            return nodeId;
+        }
+
+        public void setNodeId(String nodeId) {
+            this.nodeId = nodeId;
+        }
+
+        public String getHost() {
+            return host;
+        }
+
+        public void setHost(String host) {
+            this.host = host;
+        }
+
+        public int getPort() {
+            return port;
+        }
+
+        public void setPort(int port) {
+            this.port = port;
+        }
+
+        @Override
+        public String toString() {
+            return "NodeEndpoint{" +
+                    "nodeId='" + nodeId + '\'' +
+                    ", host='" + host + '\'' +
+                    ", port=" + port +
+                    '}';
+        }
     }
 }
