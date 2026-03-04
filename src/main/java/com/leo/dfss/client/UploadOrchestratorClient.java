@@ -35,7 +35,8 @@ public class UploadOrchestratorClient {
         }
 
         Path filePath = Path.of(args[0]);
-        new UploadOrchestratorClient().uploadFile(filePath);
+        String fileId = new UploadOrchestratorClient().uploadFile(filePath);
+        System.out.println("Upload complete. FileId = " + fileId);
     }
 
     /**
@@ -43,7 +44,7 @@ public class UploadOrchestratorClient {
      *
      * @param filePath path to the local file to upload
      */
-    public void uploadFile(Path filePath) {
+    public String uploadFile(Path filePath) {
         long fileSize;
         String fileName;
 
@@ -59,6 +60,7 @@ public class UploadOrchestratorClient {
         int chunkSizeBytes = 4096; // Fixed chunk size (4 KB) for this prototype
 
         FilesInitResponse init = initUploadWithCoordinator(fileName, fileSize, chunkSizeBytes);
+        String fileId = init.getFileId();
 
         System.out.println("\n--- Coordinator upload plan ---");
         System.out.println("fileId      = " + init.getFileId());
@@ -71,7 +73,7 @@ public class UploadOrchestratorClient {
 
         uploadChunksToNode(filePath, init);
 
-        FilesCommitAck commitAck = commitUploadWithCoordinator(init.getFileId());
+        FilesCommitAck commitAck = commitUploadWithCoordinator(fileId);
 
         System.out.println("\n--- Commit result ---");
         System.out.println("status  = " + commitAck.getStatus());
@@ -80,6 +82,7 @@ public class UploadOrchestratorClient {
         if (!"OK".equalsIgnoreCase(commitAck.getStatus())) {
             throw new RuntimeException("Commit failed: " + commitAck.getMessage());
         }
+        return fileId;
     }
 
     /**
