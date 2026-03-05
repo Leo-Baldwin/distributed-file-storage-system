@@ -28,20 +28,20 @@ The system follows a **control-plane / data-plane separation** pattern inspired 
 ```
 ┌────────────────────────────────────────────────────────────────┐
 │                          Client                                │
-│          (UploadOrchestratorClient / DownloadOrchestratorClient)│
+│    (UploadOrchestratorClient / DownloadOrchestratorClient)     │
 └──────────┬──────────────────────────────────┬──────────────────┘
            │  metadata (control-plane)        │  chunks (data-plane)
            ▼                                  ▼
-┌─────────────────────┐          ┌──────────────────────┐
-│   Coordinator        │          │   Node Server(s)     │
-│   Server             │          │                      │
-│                      │          │  - ChunkStore        │
-│  - File metadata     │          │  - Disk persistence  │
-│  - Node registry     │          │  - Upload/download   │
-│  - Heartbeat sweeper │          │    handler           │
-│  - Lifecycle states  │          │                      │
-│  - Replica placement │          │  Stores NO metadata  │
-└─────────────────────┘          └──────────────────────┘
+┌──────────────────────┐         ┌──────────────────────┐
+│   Coordinator        │         │   Node Server(s)     │
+│   Server             │         │                      │
+│                      │         │  - ChunkStore        │
+│  - File metadata     │         │  - Disk persistence  │
+│  - Node registry     │         │  - Upload/download   │
+│  - Heartbeat sweeper │         │    handler           │
+│  - Lifecycle states  │         │                      │
+│  - Replica placement │         │  Stores NO metadata  │
+└──────────────────────┘         └──────────────────────┘
 ```
 
 **Coordinator Server** — Central control-plane that manages file metadata, tracks registered storage nodes via heartbeats, enforces file lifecycle states (INIT → UPLOADING → COMPLETE), and decides replica placement. Importantly, the Coordinator never handles or stores any file content.
