@@ -17,7 +17,6 @@ Developed as a final-year project for **BEng Software Engineering** at Anglia Ru
 - [Running Tests](#running-tests)
 - [Configuration](#configuration)
 - [Limitations & Future Work](#limitations--future-work)
-- [References](#references)
 
 ---
 
