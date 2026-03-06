@@ -36,7 +36,7 @@ public class CoordinatorServer {
     private static final long SWEEP_INTERVAL_MS = 5_000;        // 5 seconds
 
     // Hardcoded replication factor
-    private static final int REPLICATION_FACTOR = 2;
+    private static final int REPLICATION_FACTOR = 3;
 
     private final ScheduledExecutorService sweeper =
             Executors.newSingleThreadScheduledExecutor();
