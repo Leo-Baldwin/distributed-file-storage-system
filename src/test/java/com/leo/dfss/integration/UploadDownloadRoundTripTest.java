@@ -31,7 +31,7 @@ class UploadDownloadRoundTripTest {
 
     @BeforeEach
     void startServers() throws Exception {
-        // IMPORTANT: NodeServer currently expects Coordinator at localhost:9000 (hardcoded).
+        // NodeServer currently expects Coordinator at localhost:9000 (hardcoded).
         coordinator = new CoordinatorServer(9000);
         coordinatorThread = new Thread(coordinator::start, "IT-Coordinator");
         coordinatorThread.setDaemon(true);
@@ -81,7 +81,7 @@ class UploadDownloadRoundTripTest {
         for (int i = 0; i < bytes.length; i++) bytes[i] = (byte) (i % 251);
         Files.write(input, bytes);
 
-        // Upload (your uploadFile now returns fileId)
+        // Upload
         String fileId = new UploadOrchestratorClient().uploadFile(input);
         assertNotNull(fileId);
         assertFalse(fileId.isBlank());

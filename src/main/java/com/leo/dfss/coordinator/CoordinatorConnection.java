@@ -177,6 +177,7 @@ public class CoordinatorConnection extends Thread {
                 targets.add(new FilesInitResponse.NodeEndpoint(ep.getNodeId(), ep.getHost(), ep.getPort()));
             }
         }
+
         response.setUploadTargets(targets);
 
         writer.send(new Message(

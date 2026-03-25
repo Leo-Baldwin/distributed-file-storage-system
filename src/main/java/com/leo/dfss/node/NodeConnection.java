@@ -191,6 +191,7 @@ public class NodeConnection extends Thread {
         }
 
         ChunkDownloadRequest request;
+
         try {
             request = gson.fromJson(data, ChunkDownloadRequest.class);
         } catch (Exception e) {
