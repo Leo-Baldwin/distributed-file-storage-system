@@ -182,11 +182,11 @@ public class CoordinatorServer {
 
                 if (result.size() == REPLICATION_FACTOR) {
                     break;
+
                 }
             }
         }
-
-        return result;
+            return result;
     }
 
     /**
