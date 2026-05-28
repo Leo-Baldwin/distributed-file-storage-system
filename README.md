@@ -286,5 +286,5 @@ Key parameters are currently defined as constants (prototype scope):
 ## Author
 
 **Leo Baldwin**
-BEng Software Engineering, Anglia Ruskin University  
+BSc Software Engineering, Anglia Ruskin University  
 Module: MOD002691 — Final Project (2025/26)
