@@ -2,7 +2,7 @@
 
 A Java-based distributed file storage system built from scratch using raw TCP sockets and a custom binary framing protocol. The system splits files into fixed-size chunks, distributes them across multiple storage nodes with configurable replication, and reconstructs them on download — providing fault tolerance and redundancy without relying on any third-party frameworks.
 
-Developed as a final-year project for **BEng Software Engineering** at Anglia Ruskin University.
+Developed as a final-year project for **BSc Software Engineering** at Anglia Ruskin University.
 
 ---
 
