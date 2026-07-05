@@ -115,7 +115,7 @@ The JSON header contains a `type` field (message discriminator), a `data` field 
 
 The system implements **client-driven synchronous replication** at the file level:
 
-- When a file upload is initialised, the Coordinator selects up to `REPLICATION_FACTOR` (default: 2) active Nodes to store replicas.
+- When a file upload is initialised, the Coordinator selects up to `REPLICATION_FACTOR` (default: 3) active Nodes to store replicas.
 - The selected Node endpoints are persisted in `FileMetadata.replicaNodes` and returned to the client as `uploadTargets`.
 - During upload, the client sends each chunk to **all** targets and requires an OK ACK from every Node before proceeding (strict acknowledgement policy).
 - During download, the Coordinator returns all replica Nodes as `downloadSources`. The client tries each source in order, providing transparent failover if a Node is unavailable.
