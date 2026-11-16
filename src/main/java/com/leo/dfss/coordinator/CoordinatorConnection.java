@@ -138,8 +138,15 @@ public class CoordinatorConnection extends Thread {
             return;
         }
 
-        if (request.getFilename() == null || request.getFilename().isBlank()) {
+        String filename = request.getFilename();
+        if (filename == null || filename.isBlank()) {
             writer.send(new Message("ERROR", "Missing file name."), null);
+            return;
+        }
+        // A plain name only: it is later used as a path by downloading clients
+        if (filename.equals(".") || filename.equals("..") || filename.contains("/")
+                || filename.contains("\\") || filename.indexOf('\0') >= 0) {
+            writer.send(new Message("ERROR", "File name must not contain path separators."), null);
             return;
         }
 
@@ -147,17 +154,24 @@ public class CoordinatorConnection extends Thread {
             writer.send(new Message("ERROR", "totalSizeBytes must be greater than 0."), null);
             return;
         }
-        if (request.getChunkSizeBytes() <= 0) {
-            writer.send(new Message("ERROR", "chunkSizeBytes must be greater than 0."), null);
+        if (request.getChunkSizeBytes() <= 0 || request.getChunkSizeBytes() > TcpMessageReader.MAX_BODY_BYTES) {
+            writer.send(new Message("ERROR",
+                    "chunkSizeBytes must be between 1 and " + TcpMessageReader.MAX_BODY_BYTES + "."), null);
             return;
         }
 
         // Call Coordinator to initialise file upload with metadata
-        FileMetadata meta =
-                coordinator.initFileUpload(
-                        request.getFilename(),
-                        request.getTotalSizeBytes(),
-                        request.getChunkSizeBytes());
+        FileMetadata meta;
+        try {
+            meta = coordinator.initFileUpload(
+                    request.getFilename(),
+                    request.getTotalSizeBytes(),
+                    request.getChunkSizeBytes());
+        } catch (IllegalStateException e) {
+            // e.g. no storage nodes are UP. Report it instead of letting it kill this connection thread.
+            writer.send(new Message("ERROR", e.getMessage()), null);
+            return;
+        }
 
         // Respond to client with file details
         FilesInitResponse response = new FilesInitResponse();
@@ -224,7 +238,7 @@ public class CoordinatorConnection extends Thread {
         if (!ok) {
             writer.send(new Message(
                     "ERROR",
-                    "Unknown fileId: " + request.getFileId()),
+                    "Unknown fileId or file is not uploading: " + request.getFileId()),
                     null);
             return;
         }
@@ -320,23 +334,28 @@ public class CoordinatorConnection extends Thread {
             return;
         }
 
-        if (req.getNodeId() == null || req.getNodeId().isBlank()
-                || req.getHost() == null || req.getHost().isBlank()
-                || req.getPort() <= 0) {
+        if (req.getNodeId() == null || req.getNodeId().isBlank() || req.getPort() <= 0) {
 
             NodeRegisterAck ack = new NodeRegisterAck();
             ack.setStatus("ERROR");
-            ack.setMessage("Missing/invalid fields (nodeId, host, port)");
+            ack.setMessage("Missing/invalid fields (nodeId, port)");
 
             writer.send(new Message("NODE_REGISTER_ACK", gson.toJson(ack)), null);
             return;
         }
 
+        // If the node didn't say how clients should reach it, use the address it connected from
+        String host = req.getHost();
+        if (host == null || host.isBlank()) {
+            host = socket.getInetAddress().getHostAddress();
+        }
+
         boolean ok = coordinator.registerNode(
                 req.getNodeId(),
-                req.getHost(),
+                host,
                 req.getPort(),
-                req.getCapacityBytes()
+                req.getCapacityBytes(),
+                req.getFailureDomain()
         );
 
         NodeRegisterAck ack = new NodeRegisterAck();
@@ -381,7 +400,7 @@ public class CoordinatorConnection extends Thread {
             ts = System.currentTimeMillis();
         }
 
-        boolean ok = coordinator.handleHeartbeat(hb.getNodeId(), ts);
+        boolean ok = coordinator.handleHeartbeat(hb.getNodeId(), ts, hb.getFreeBytes());
         if (!ok) {
             writer.send(new Message("ERROR", "Unknown nodeId: " + hb.getNodeId()), null);
             return;

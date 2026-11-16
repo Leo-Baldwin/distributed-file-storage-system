@@ -32,7 +32,8 @@ public class TcpMessageWriter {
      * @param outputStream underlying TCP socket output stream
      */
     public TcpMessageWriter(OutputStream outputStream) {
-        this.out = new DataOutputStream(outputStream);
+        // Buffered so the length prefix, header and body go out together on flush()
+        this.out = new DataOutputStream(new java.io.BufferedOutputStream(outputStream, 64 * 1024));
     }
 
     /**

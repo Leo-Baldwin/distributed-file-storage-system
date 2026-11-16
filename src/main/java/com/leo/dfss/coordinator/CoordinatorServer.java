@@ -1,5 +1,7 @@
 package com.leo.dfss.coordinator;
 
+import com.leo.dfss.config.CoordinatorConfig;
+
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -23,7 +25,7 @@ import java.util.concurrent.*;
  */
 public class CoordinatorServer {
 
-    private final int port; // TCP port this CoordinatorServer listens on
+    private final CoordinatorConfig config;
 
     // Global file registry: fileId -> FileMetadata
     private final Map<String, FileMetadata> files = new ConcurrentHashMap<>();
@@ -31,27 +33,34 @@ public class CoordinatorServer {
     // Global node registry: nodeId -> NodeInfo
     private final Map<String, NodeInfo> nodes = new ConcurrentHashMap<>();
 
-    // Node heartbeat configuration
-    private static final long HEARTBEAT_TIMEOUT_MS = 15_000;    // 15 seconds
-    private static final long SWEEP_INTERVAL_MS = 5_000;        // 5 seconds
-
-    // Hardcoded replication factor
-    private static final int REPLICATION_FACTOR = 3;
-
     private final ScheduledExecutorService sweeper =
-            Executors.newSingleThreadScheduledExecutor();
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "CoordinatorSweeper");
+                t.setDaemon(true);
+                return t;
+            });
 
     // Global connections registry
     private final CopyOnWriteArrayList<CoordinatorConnection> connections = new CopyOnWriteArrayList<>();
 
+    // Counted down once the server socket is bound (or binding failed)
+    private final CountDownLatch ready = new CountDownLatch(1);
+    private volatile ServerSocket serverSocket;
+    private volatile Exception startupError;
+
     private volatile boolean running = true;
 
+    public CoordinatorServer(CoordinatorConfig config) {
+        this.config = config;
+    }
+
+    /** Convenience constructor using default settings on the given port. */
     public CoordinatorServer(int port) {
-        this.port = port;
+        this(CoordinatorConfig.onPort(port));
     }
 
     public static void main(String[] args) {
-        new CoordinatorServer(9000).start();
+        new CoordinatorServer(CoordinatorConfig.defaults()).start();
     }
 
     /**
@@ -61,9 +70,11 @@ public class CoordinatorServer {
     public void start() {
         System.out.println("Starting CoordinatorServer...");
 
-        // Try-with-resources ensures the ServerSocket is closed when the server stops
-        try (ServerSocket serverSocket = new ServerSocket(port)) {
-            System.out.println("CoordinatorServer listening on port: " + port);
+        try (ServerSocket socket = new ServerSocket(config.port())) {
+            serverSocket = socket;
+            ready.countDown();
+            System.out.println("CoordinatorServer listening on port: " + socket.getLocalPort()
+                    + " (replication factor " + config.replicationFactor() + ")");
 
             startNodeSweeper();
 
@@ -71,12 +82,13 @@ public class CoordinatorServer {
 
             while (running) {
                 // Blocks until a client connects
-                Socket socket = serverSocket.accept();
-                System.out.println("Accepted connection from " + socket.getRemoteSocketAddress());
+                Socket client = socket.accept();
+                System.out.println("Accepted connection from " + client.getRemoteSocketAddress());
 
                 // Create a per-connection handler thread (one thread per client socket)
                 CoordinatorConnection connection =
-                        new CoordinatorConnection(socket, nextConnectionId++, this);
+                        new CoordinatorConnection(client, nextConnectionId++, this);
+                connection.setDaemon(true);
 
                 // Track and start the connection handler thread
                 connections.add(connection);
@@ -84,6 +96,10 @@ public class CoordinatorServer {
             }
 
         } catch (IOException e) {
+            if (ready.getCount() > 0) {
+                startupError = e;
+                ready.countDown();
+            }
             if (running) {
                 e.printStackTrace();
             } else {
@@ -93,6 +109,38 @@ public class CoordinatorServer {
             sweeper.shutdownNow();
             shutdownAllConnections();
         }
+    }
+
+    /**
+     * Waits until the server socket is bound.
+     *
+     * @throws IllegalStateException if binding failed or did not happen in time
+     */
+    public void awaitReady(long timeout, TimeUnit unit) throws InterruptedException {
+        if (!ready.await(timeout, unit)) {
+            throw new IllegalStateException("Coordinator did not start within " + timeout + " " + unit);
+        }
+        if (startupError != null) {
+            throw new IllegalStateException("Coordinator failed to start", startupError);
+        }
+    }
+
+    /** @return the port actually bound (useful when configured with port 0). Call after {@link #awaitReady}. */
+    public int getPort() {
+        ServerSocket s = serverSocket;
+        if (s == null) throw new IllegalStateException("Coordinator is not listening yet");
+        return s.getLocalPort();
+    }
+
+    /** Stops accepting connections, stops the sweeper and closes all open connections. */
+    public void shutdown() {
+        running = false;
+        try {
+            if (serverSocket != null) serverSocket.close();
+        } catch (IOException ignored) {
+        }
+        sweeper.shutdownNow();
+        shutdownAllConnections();
     }
 
     /**
@@ -108,7 +156,7 @@ public class CoordinatorServer {
 
     /**
      * Starts a periodic sweeper that checks node heartbeats.
-     * If a node has not been seen for {@link #HEARTBEAT_TIMEOUT_MS} milliseconds it is marked DOWN.
+     * If a node has not been seen within the configured timeout it is marked DOWN.
      */
     private void startNodeSweeper() {
         sweeper.scheduleAtFixedRate(() -> {
@@ -117,21 +165,22 @@ public class CoordinatorServer {
             for (NodeInfo node : nodes.values()) {
                 long age = now - node.getLastSeenEpochMs();
 
-                if (node.getStatus() == NodeInfo.Status.UP && age > HEARTBEAT_TIMEOUT_MS) {
+                if (node.getStatus() == NodeInfo.Status.UP && age > config.heartbeatTimeoutMs()) {
                     node.markDown();
                     System.out.println("Node " + node.getNodeId() + " is DOWN");
                 }
             }
-        }, SWEEP_INTERVAL_MS, SWEEP_INTERVAL_MS, TimeUnit.MILLISECONDS);
+        }, config.sweepIntervalMs(), config.sweepIntervalMs(), TimeUnit.MILLISECONDS);
     }
 
     /**
-     * Creates a new in-memory file metadata record and assigns it to an active Node.
+     * Creates a new in-memory file metadata record and assigns it to active Nodes.
      *
      * @param filename       name of the file
      * @param totalSizeBytes total size of the file
      * @param chunkSizeBytes size of each chunk
      * @return the metadata of the file
+     * @throws IllegalStateException if no storage nodes are UP
      */
     public FileMetadata initFileUpload(String filename,
                                        long totalSizeBytes,
@@ -168,9 +217,10 @@ public class CoordinatorServer {
     }
 
     /**
-     * Returns up to REPLICATION_FACTOR active nodes for storing replicas.
+     * Returns up to the configured replication factor of active nodes for storing replicas.
      * If fewer nodes are available than the replication factor,
      * the method degrades gracefully and returns the available nodes.
+     * (Phase 2 replaces this with capacity- and failure-domain-aware placement.)
      */
     public List<NodeInfo> getActiveNodesForReplication() {
 
@@ -180,13 +230,12 @@ public class CoordinatorServer {
             if (node.getStatus() == NodeInfo.Status.UP) {
                 result.add(node);
 
-                if (result.size() == REPLICATION_FACTOR) {
+                if (result.size() == config.replicationFactor()) {
                     break;
-
                 }
             }
         }
-            return result;
+        return result;
     }
 
     /**
@@ -202,32 +251,43 @@ public class CoordinatorServer {
             return false;
         }
 
-        metadata.setStatus(FileMetadata.Status.COMPLETE);
+        // Only an in-progress upload can be committed (not an unknown, INIT or already-COMPLETE file).
+        // Synchronised on the record so two concurrent commits can't both succeed.
+        synchronized (metadata) {
+            if (metadata.getStatus() != FileMetadata.Status.UPLOADING) {
+                return false;
+            }
+            metadata.setStatus(FileMetadata.Status.COMPLETE);
+        }
 
         System.out.println("Committed file record: " + metadata);
         return true;
     }
 
     /**
-     * Handles NODE_REGISTER.
+     * Handles NODE_REGISTER. Re-registering an existing nodeId (e.g. after a node restart)
+     * replaces its record and marks it UP.
      *
      * @param nodeId        nodes unique identifier
-     * @param host          server host
+     * @param host          address clients use to reach the node
      * @param port          servers data port
      * @param capacityBytes the nodes storage capacity in bytes
+     * @param failureDomain what the node fails together with (usually its machine)
      * @return true if node registered with CoordinatorServer successfully
      */
-    public boolean registerNode(String nodeId, String host, int port, long capacityBytes) {
+    public boolean registerNode(String nodeId, String host, int port, long capacityBytes, String failureDomain) {
         long now = System.currentTimeMillis();
 
         if (nodeId == null || nodeId.isBlank()) return false;
         if (host == null || host.isBlank()) return false;
         if (port <= 0) return false;
 
-        NodeInfo node = new NodeInfo(nodeId, host, port, capacityBytes, now);
+        String domain = (failureDomain == null || failureDomain.isBlank()) ? nodeId : failureDomain;
+        NodeInfo node = new NodeInfo(nodeId, host, port, capacityBytes, domain, now);
         nodes.put(nodeId, node);
 
-        System.out.println("Node " + node.getNodeId() + " is registered");
+        System.out.println("Node " + node.getNodeId() + " is registered at " + host + ":" + port
+                + " (domain " + domain + ")");
         return true;
     }
 
@@ -236,16 +296,16 @@ public class CoordinatorServer {
      *
      * @param nodeId           unique identifier for the node that sent the heartbeat message
      * @param timeStampEpochMs the timestamp that the heartbeat was sent by the node
+     * @param freeBytes        free space reported by the node (ignored if not positive)
      * @return true if heartbeat is successfully updated for that nodes NodeInfo registry, else false
      */
-    public boolean handleHeartbeat(String nodeId, long timeStampEpochMs) {
+    public boolean handleHeartbeat(String nodeId, long timeStampEpochMs, long freeBytes) {
         NodeInfo node = nodes.get(nodeId); // Retrieve node by its ID
         if (node == null) {
-            return false; // node cannot be retrieved
+            return false; // unknown node (e.g. the Coordinator restarted); the node will re-register
         }
 
-        node.updateHeartbeat(timeStampEpochMs);
-        System.out.println("Heartbeat from node " + nodeId + " at " + timeStampEpochMs);
+        node.updateHeartbeat(timeStampEpochMs, freeBytes);
         return true;
     }
 
@@ -266,6 +326,11 @@ public class CoordinatorServer {
      */
     public Map<String, NodeInfo> getNodes() {
         return nodes;
+    }
+
+    /** @return number of nodes currently marked UP */
+    public long countActiveNodes() {
+        return nodes.values().stream().filter(n -> n.getStatus() == NodeInfo.Status.UP).count();
     }
 
     /**

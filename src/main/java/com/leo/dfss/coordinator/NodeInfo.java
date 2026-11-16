@@ -26,6 +26,9 @@ public class NodeInfo {
     private final String host;
     private final int port;
     private final long capacityBytes;
+    private final String failureDomain;
+
+    private volatile long freeBytes; // Free space last reported by the node's heartbeat
 
     private volatile long lastSeenEpochMs; // Last heartbeat time (epoch millis)
     private volatile Status status; // Current availability state
@@ -38,12 +41,15 @@ public class NodeInfo {
                     String host,
                     int port,
                     long capacityBytes,
+                    String failureDomain,
                     long lastSeenEpochMs) {
 
         this.nodeId = nodeId;
         this.host = host;
         this.port = port;
         this.capacityBytes = capacityBytes;
+        this.failureDomain = failureDomain;
+        this.freeBytes = capacityBytes;
         this.lastSeenEpochMs = lastSeenEpochMs;
         this.status = Status.UP;
     }
@@ -77,6 +83,20 @@ public class NodeInfo {
     }
 
     /**
+     * @return label for what fails together with this node (usually its machine)
+     */
+    public String getFailureDomain() {
+        return failureDomain;
+    }
+
+    /**
+     * @return free space most recently reported by the node
+     */
+    public long getFreeBytes() {
+        return freeBytes;
+    }
+
+    /**
      * @return timestamp of the most recent heartbeat seen by the Coordinator (epoch millis)
      */
     public long getLastSeenEpochMs() {
@@ -93,8 +113,11 @@ public class NodeInfo {
     /**
      * Updates the last-seen timestamp from a heartbeat and marks the node as {@link Status#UP}.
      */
-    public void updateHeartbeat(long epochMs) {
+    public void updateHeartbeat(long epochMs, long freeBytes) {
         this.lastSeenEpochMs = epochMs;
+        if (freeBytes > 0) {
+            this.freeBytes = freeBytes;
+        }
         this.status = Status.UP;
     }
 
@@ -112,6 +135,8 @@ public class NodeInfo {
                 ", host=" + host +
                 ", port=" + port +
                 ", capacityBytes=" + capacityBytes +
+                ", freeBytes=" + freeBytes +
+                ", failureDomain=" + failureDomain +
                 ", lastSeenEpochMs=" + lastSeenEpochMs +
                 ", status=" + status +
                 '}';

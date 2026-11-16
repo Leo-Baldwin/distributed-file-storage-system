@@ -10,6 +10,7 @@ public class NodeRegisterRequest {
     private String host;
     private int port;
     private long capacityBytes;
+    private String failureDomain;
     private int bodyLength = 0;
 
     public NodeRegisterRequest() {}
@@ -52,6 +53,14 @@ public class NodeRegisterRequest {
 
     public void setCapacityBytes(long capacityBytes) {
         this.capacityBytes = capacityBytes;
+    }
+
+    public String getFailureDomain() {
+        return failureDomain;
+    }
+
+    public void setFailureDomain(String failureDomain) {
+        this.failureDomain = failureDomain;
     }
 
     public int getBodyLength() {

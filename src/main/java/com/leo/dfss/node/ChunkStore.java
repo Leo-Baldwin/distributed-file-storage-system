@@ -43,9 +43,7 @@ public class ChunkStore {
      */
     public void writeChunk(String fileId, int chunkIndex, byte[] data) throws IOException {
 
-        if (fileId == null || fileId.isBlank()) {
-            throw new IllegalArgumentException("fileId cannot be null or blank");
-        }
+        requireValidFileId(fileId);
         if (chunkIndex < 0) {
             throw new IllegalArgumentException("chunkIndex cannot be negative");
         }
@@ -74,9 +72,7 @@ public class ChunkStore {
      */
     public byte[] readChunk(String fileId, int chunkIndex) throws IOException {
 
-        if (fileId == null || fileId.isBlank()) {
-            throw new IllegalArgumentException("fileId cannot be null or blank");
-        }
+        requireValidFileId(fileId);
         if (chunkIndex < 0) {
             throw new IllegalArgumentException("chunkIndex cannot be negative");
         }
@@ -96,7 +92,7 @@ public class ChunkStore {
      * @return true if the chunk exists, otherwise false
      */
     public boolean chunkExists(String fileId, int chunkIndex) {
-        if (fileId == null || fileId.isBlank() || chunkIndex < 0) {
+        if (!isValidFileId(fileId) || chunkIndex < 0) {
             return false;
         }
 
@@ -105,6 +101,23 @@ public class ChunkStore {
                 .resolve(chunkIndex + ".bin");
 
         return Files.exists(chunkPath);
+    }
+
+    /**
+     * File IDs are issued by the Coordinator as UUIDs. Accepting only that exact form means a
+     * client-supplied ID can never contain path separators or "..", so it can't escape chunksDir.
+     */
+    private static final java.util.regex.Pattern FILE_ID =
+            java.util.regex.Pattern.compile("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
+
+    static boolean isValidFileId(String fileId) {
+        return fileId != null && FILE_ID.matcher(fileId).matches();
+    }
+
+    private static void requireValidFileId(String fileId) {
+        if (!isValidFileId(fileId)) {
+            throw new IllegalArgumentException("fileId must be a lowercase UUID");
+        }
     }
 
     /**
