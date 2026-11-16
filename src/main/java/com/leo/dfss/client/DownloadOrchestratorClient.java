@@ -51,7 +51,7 @@ public class DownloadOrchestratorClient {
 
     public static void main(String[] args) throws IOException {
         if (args.length != 2) {
-            System.out.println("Usage: DownloadOrchestratorClient <fileId> <outputDir>");
+            System.err.println("Usage: DownloadOrchestratorClient <fileId> <outputDir>");
             return;
         }
 
@@ -72,11 +72,11 @@ public class DownloadOrchestratorClient {
         // 1) Ask the Coordinator for file metadata and Node download location(s)
         FilesGetResponse info = getFileInfo(fileId);
 
-        System.out.println("Downloading file: " + info.getFilename());
-        System.out.println("Total chunks: " + info.getTotalChunks());
+        System.err.println("Downloading file: " + info.getFilename());
+        System.err.println("Total chunks: " + info.getTotalChunks());
 
         if (info.getDownloadSources() != null && !info.getDownloadSources().isEmpty()) {
-            System.out.println("downloadSources = " + info.getDownloadSources());
+            System.err.println("downloadSources = " + info.getDownloadSources());
         }
 
         Files.createDirectories(outputDir);
@@ -109,7 +109,7 @@ public class DownloadOrchestratorClient {
             sessions.values().forEach(NodeSession::close);
         }
 
-        System.out.println("Download complete: " + outputPath.toAbsolutePath());
+        System.err.println("Download complete: " + outputPath.toAbsolutePath());
     }
 
     /**
@@ -188,7 +188,7 @@ public class DownloadOrchestratorClient {
                 failed.add(source);
                 NodeSession broken = sessions.remove(source);
                 if (broken != null) broken.close();
-                System.out.println("Chunk " + chunkIndex + " failed from " + source + " (" + e.getMessage()
+                System.err.println("Chunk " + chunkIndex + " failed from " + source + " (" + e.getMessage()
                         + "), trying next source...");
             }
         }

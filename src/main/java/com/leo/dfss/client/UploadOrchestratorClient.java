@@ -45,13 +45,13 @@ public class UploadOrchestratorClient {
 
     public static void main(String[] args) {
         if (args.length != 1) {
-            System.out.println("Usage: UploadOrchestratorClient <filePath>");
+            System.err.println("Usage: UploadOrchestratorClient <filePath>");
             return;
         }
 
         Path filePath = Path.of(args[0]);
         String fileId = new UploadOrchestratorClient().uploadFile(filePath);
-        System.out.println("Upload complete. FileId = " + fileId);
+        System.out.println(fileId);
     }
 
     /**
@@ -70,23 +70,23 @@ public class UploadOrchestratorClient {
             throw new RuntimeException("Failed to read file metadata", e);
         }
 
-        System.out.println("Uploading file: " + fileName + " (" + fileSize + " bytes)");
+        System.err.println("Uploading file: " + fileName + " (" + fileSize + " bytes)");
 
         int chunkSizeBytes = config.chunkSizeBytes();
 
         FilesInitResponse init = initUploadWithCoordinator(fileName, fileSize, chunkSizeBytes);
         String fileId = init.getFileId();
 
-        System.out.println("fileId " + fileId + ": " + init.getTotalChunks() + " chunk(s) of "
+        System.err.println("fileId " + fileId + ": " + init.getTotalChunks() + " chunk(s) of "
                 + init.getChunkSizeBytes() + " bytes");
 
         uploadChunksToNodes(filePath, init);
 
         FilesCommitAck commitAck = commitUploadWithCoordinator(fileId);
 
-        System.out.println("\n--- Commit result ---");
-        System.out.println("status  = " + commitAck.getStatus());
-        System.out.println("message = " + commitAck.getMessage());
+        System.err.println("\n--- Commit result ---");
+        System.err.println("status  = " + commitAck.getStatus());
+        System.err.println("message = " + commitAck.getMessage());
 
         if (!"OK".equalsIgnoreCase(commitAck.getStatus())) {
             throw new RuntimeException("Commit failed: " + commitAck.getMessage());
@@ -110,7 +110,7 @@ public class UploadOrchestratorClient {
             // Read welcome message from coordinator server
             ReceivedMessage welcome = reader.read();
             if (welcome != null && welcome.getHeader() != null) {
-                System.out.println("Coordinator -> " + welcome.getHeader().getType() + " " + welcome.getHeader().getData());
+                System.err.println("Coordinator -> " + welcome.getHeader().getType() + " " + welcome.getHeader().getData());
             }
 
             // Build typed request
@@ -164,7 +164,7 @@ public class UploadOrchestratorClient {
         } else {
             targets.add(new FilesInitResponse.NodeEndpoint("primary", init.getUploadHost(), init.getUploadPort()));
         }
-        System.out.println("Uploading to " + targets.size() + " node(s): " + targets);
+        System.err.println("Uploading to " + targets.size() + " node(s): " + targets);
 
         List<NodeSession> sessions = new ArrayList<>();
         ExecutorService pool = Executors.newFixedThreadPool(targets.size());
@@ -217,7 +217,7 @@ public class UploadOrchestratorClient {
             sessions.forEach(NodeSession::close);
         }
 
-        System.out.println("All " + init.getTotalChunks() + " chunk(s) uploaded.");
+        System.err.println("All " + init.getTotalChunks() + " chunk(s) uploaded.");
     }
 
     /**
@@ -231,7 +231,7 @@ public class UploadOrchestratorClient {
             // Read welcome message from CoordinatorServer
             ReceivedMessage welcome = reader.read();
             if (welcome != null && welcome.getHeader() != null) {
-                System.out.println("Coordinator -> " + welcome.getHeader().getType() + " " + welcome.getHeader().getData());
+                System.err.println("Coordinator -> " + welcome.getHeader().getType() + " " + welcome.getHeader().getData());
             }
 
             // Build commit request
