@@ -2,15 +2,18 @@ package com.leo.dfss.integration;
 
 import com.leo.dfss.client.DownloadOrchestratorClient;
 import com.leo.dfss.client.UploadOrchestratorClient;
-import com.leo.dfss.coordinator.CoordinatorServer;
-import com.leo.dfss.node.NodeServer;
-import java.io.InputStream;
-import java.security.MessageDigest;
-import org.junit.jupiter.api.*;
+import com.leo.dfss.config.ClientConfig;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.util.HexFormat;
+import java.util.Random;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -19,88 +22,91 @@ class UploadDownloadRoundTripTest {
     @TempDir
     Path tempDir;
 
-    private Thread coordinatorThread;
-    private Thread nodeThread1;
-    private Thread nodeThread2;
-    private Thread nodeThread3;
-
-    private CoordinatorServer coordinator;
-    private NodeServer node1;
-    private NodeServer node2;
-    private NodeServer node3;
+    private TestCluster cluster;
 
     @BeforeEach
-    void startServers() throws Exception {
-        // NodeServer currently expects Coordinator at localhost:9000 (hardcoded).
-        coordinator = new CoordinatorServer(9000);
-        coordinatorThread = new Thread(coordinator::start, "IT-Coordinator");
-        coordinatorThread.setDaemon(true);
-        coordinatorThread.start();
-
-        // Nodes on 9100/9200/9300, chunks stored in separate temp directories
-        Path nodeData1 = tempDir.resolve("node-data-1");
-        Path nodeData2 = tempDir.resolve("node-data-2");
-        Path nodeData3 = tempDir.resolve("node-data-3");
-
-        node1 = new NodeServer(9100, nodeData1);
-        nodeThread1 = new Thread(node1::start, "IT-Node-1");
-        nodeThread1.setDaemon(true);
-        nodeThread1.start();
-
-        node2 = new NodeServer(9200, nodeData2);
-        nodeThread2 = new Thread(node2::start, "IT-Node-2");
-        nodeThread2.setDaemon(true);
-        nodeThread2.start();
-
-        node3 = new NodeServer(9300, nodeData3);
-        nodeThread3 = new Thread(node3::start, "IT-Node-3");
-        nodeThread3.setDaemon(true);
-        nodeThread3.start();
-
-        // Give servers a moment to bind ports + for node to register
-        Thread.sleep(800);
+    void startCluster() throws Exception {
+        cluster = TestCluster.start(tempDir.resolve("cluster"), 3);
     }
 
     @AfterEach
-    void stopServers() {
-        // NodeServer has a shutdown() already
-        try { if (node1 != null) node1.shutdown(); } catch (Exception ignored) {}
-        try { if (node2 != null) node2.shutdown(); } catch (Exception ignored) {}
-        try { if (node3 != null) node3.shutdown(); } catch (Exception ignored) {}
-
-        // CoordinatorServer may not have a full shutdown() accept-loop stop yet.
-        // For now, rely on daemon threads ending when tests finish.
-        try { coordinator.shutdownAllConnections(); } catch (Exception ignored) {}
+    void stopCluster() {
+        if (cluster != null) cluster.close();
     }
 
     @Test
     void uploadThenDownload_fileIsIdentical() throws Exception {
-        // Create an input file
-        Path input = tempDir.resolve("input.bin");
-        byte[] bytes = new byte[120_000];
-        for (int i = 0; i < bytes.length; i++) bytes[i] = (byte) (i % 251);
-        Files.write(input, bytes);
+        // Small chunks so this file spans many chunks (and a partial last chunk)
+        ClientConfig client = cluster.client().withChunkSize(4096);
+        Path input = writePatternFile("input.bin", 120_000);
 
-        // Upload
-        String fileId = new UploadOrchestratorClient().uploadFile(input);
+        assertRoundTrip(client, input);
+    }
+
+    @Test
+    void largeFile_withDefaultChunkSize_roundTrips() throws Exception {
+        Path input = writeRandomFile("large.bin", 50 * 1024 * 1024 + 123); // 50 MiB plus a partial chunk
+
+        assertRoundTrip(cluster.client(), input);
+    }
+
+    @Test
+    void download_survivesNodeFailure() throws Exception {
+        ClientConfig client = cluster.client().withChunkSize(64 * 1024);
+        Path input = writeRandomFile("failover.bin", 1_000_000);
+
+        String fileId = new UploadOrchestratorClient(client).uploadFile(input);
+
+        // Every chunk is on all 3 nodes, so losing any two must not matter
+        cluster.nodes.get(0).shutdown();
+        cluster.nodes.get(1).shutdown();
+
+        Path outDir = Files.createDirectories(tempDir.resolve("downloads"));
+        new DownloadOrchestratorClient(client).downloadFile(fileId, outDir);
+
+        assertEquals(sha256(input), sha256(outDir.resolve(input.getFileName())));
+    }
+
+    @Test
+    void upload_withNoNodes_failsWithClearError() throws Exception {
+        cluster.close();
+        try (TestCluster empty = TestCluster.start(tempDir.resolve("empty"), 0)) {
+            Path input = writePatternFile("orphan.bin", 10);
+            RuntimeException e = assertThrows(RuntimeException.class,
+                    () -> new UploadOrchestratorClient(empty.client()).uploadFile(input));
+            assertTrue(fullMessage(e).contains("No active storage nodes"), fullMessage(e));
+        }
+    }
+
+    private void assertRoundTrip(ClientConfig client, Path input) throws Exception {
+        String fileId = new UploadOrchestratorClient(client).uploadFile(input);
         assertNotNull(fileId);
         assertFalse(fileId.isBlank());
 
-        // Download into a new directory
-        Path outDir = tempDir.resolve("downloads");
-        Files.createDirectories(outDir);
+        Path outDir = Files.createDirectories(tempDir.resolve("downloads"));
+        new DownloadOrchestratorClient(client).downloadFile(fileId, outDir);
 
-        new DownloadOrchestratorClient().downloadFile(fileId, outDir);
-
-        // DownloadOrchestratorClient reconstructs using filename from metadata
         Path output = outDir.resolve(input.getFileName().toString());
         assertTrue(Files.exists(output), "Expected reconstructed file at " + output);
+        assertEquals(sha256(input), sha256(output), "Downloaded file differs from uploaded file");
+    }
 
-        // Compare hashes
-        String inHash = sha256(input);
-        String outHash = sha256(output);
+    private Path writePatternFile(String name, int size) throws Exception {
+        byte[] bytes = new byte[size];
+        for (int i = 0; i < bytes.length; i++) bytes[i] = (byte) (i % 251);
+        return Files.write(tempDir.resolve(name), bytes);
+    }
 
-        assertEquals(inHash, outHash, "Downloaded file differs from uploaded file");
+    private Path writeRandomFile(String name, int size) throws Exception {
+        byte[] bytes = new byte[size];
+        new Random(7).nextBytes(bytes);
+        return Files.write(tempDir.resolve(name), bytes);
+    }
+
+    private static String fullMessage(Throwable t) {
+        StringBuilder sb = new StringBuilder();
+        for (; t != null; t = t.getCause()) sb.append(t.getMessage()).append(" | ");
+        return sb.toString();
     }
 
     private static String sha256(Path file) throws Exception {
@@ -112,12 +118,6 @@ class UploadDownloadRoundTripTest {
                 md.update(buffer, 0, read);
             }
         }
-
-        byte[] hash = md.digest();
-        StringBuilder hex = new StringBuilder(hash.length * 2);
-        for (byte b : hash) {
-            hex.append(String.format("%02x", b));
-        }
-        return hex.toString();
+        return HexFormat.of().formatHex(md.digest());
     }
 }

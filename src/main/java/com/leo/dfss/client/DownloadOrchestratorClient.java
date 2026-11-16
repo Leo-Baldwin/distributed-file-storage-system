@@ -1,6 +1,7 @@
 package com.leo.dfss.client;
 
 import com.google.gson.Gson;
+import com.leo.dfss.config.ClientConfig;
 import com.leo.dfss.protocol.ChunkDownloadRequest;
 import com.leo.dfss.protocol.FilesGetRequest;
 import com.leo.dfss.protocol.FilesGetResponse;
@@ -32,8 +33,16 @@ public class DownloadOrchestratorClient {
 
     private static final Gson gson = new Gson();
 
-    private final String coordinatorHost = "localhost"; // Coordinator host (control-plane)
-    private final int coordinatorPort = 9000;            // Coordinator port (control-plane)
+    private final ClientConfig config;
+
+    public DownloadOrchestratorClient(ClientConfig config) {
+        this.config = config;
+    }
+
+    /** Uses a Coordinator on localhost at the default port, with the default chunk size. */
+    public DownloadOrchestratorClient() {
+        this(ClientConfig.defaults());
+    }
 
     public static void main(String[] args) throws IOException {
         if (args.length != 2) {
@@ -96,7 +105,7 @@ public class DownloadOrchestratorClient {
      * Fetches file metadata and Node download location from the Coordinator.
      */
     private FilesGetResponse getFileInfo(String fileId) {
-        try (Socket socket = new Socket(coordinatorHost, coordinatorPort)) {
+        try (Socket socket = new Socket(config.coordinatorHost(), config.coordinatorPort())) {
 
             TcpMessageReader reader = new TcpMessageReader(socket.getInputStream());
             TcpMessageWriter writer = new TcpMessageWriter(socket.getOutputStream());

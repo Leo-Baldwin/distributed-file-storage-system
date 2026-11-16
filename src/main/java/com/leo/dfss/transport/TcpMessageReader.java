@@ -38,7 +38,7 @@ public class TcpMessageReader {
      * @param inputStream underlying TCP socket input stream
      */
     public TcpMessageReader(InputStream inputStream) {
-        this.in = new DataInputStream(inputStream);
+        this.in = new DataInputStream(new BufferedInputStream(inputStream, 64 * 1024));
     }
 
     /**

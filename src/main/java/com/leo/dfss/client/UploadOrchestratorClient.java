@@ -1,6 +1,7 @@
 package com.leo.dfss.client;
 
 import com.google.gson.Gson;
+import com.leo.dfss.config.ClientConfig;
 import com.leo.dfss.protocol.*;
 import com.leo.dfss.transport.ReceivedMessage;
 import com.leo.dfss.transport.TcpMessageReader;
@@ -27,8 +28,16 @@ public class UploadOrchestratorClient {
 
     private static final Gson gson = new Gson();
 
-    private final String coordinatorHost = "localhost"; // Coordinator host (control-plane)
-    private final int coordinatorPort = 9000; // Coordinator port (control-plane)
+    private final ClientConfig config;
+
+    public UploadOrchestratorClient(ClientConfig config) {
+        this.config = config;
+    }
+
+    /** Uses a Coordinator on localhost at the default port, with the default chunk size. */
+    public UploadOrchestratorClient() {
+        this(ClientConfig.defaults());
+    }
 
     public static void main(String[] args) {
         if (args.length != 1) {
@@ -59,7 +68,7 @@ public class UploadOrchestratorClient {
 
         System.out.println("Uploading file: " + fileName + " (" + fileSize + " bytes)");
 
-        int chunkSizeBytes = 4096; // Fixed chunk size (4 KB) for this prototype
+        int chunkSizeBytes = config.chunkSizeBytes();
 
         FilesInitResponse init = initUploadWithCoordinator(fileName, fileSize, chunkSizeBytes);
         String fileId = init.getFileId();
@@ -99,7 +108,7 @@ public class UploadOrchestratorClient {
             long fileSize,
             int chunkSizeBytes
     ) {
-        try (Socket socket = new Socket(coordinatorHost, coordinatorPort)) {
+        try (Socket socket = new Socket(config.coordinatorHost(), config.coordinatorPort())) {
             TcpMessageReader reader = new TcpMessageReader(socket.getInputStream());
             TcpMessageWriter writer = new TcpMessageWriter(socket.getOutputStream());
 
@@ -286,7 +295,7 @@ public class UploadOrchestratorClient {
      * Sends FILES_COMMIT to the Coordinator to mark the file COMPLETE.
      */
     private FilesCommitAck commitUploadWithCoordinator(String fileId) {
-        try (Socket socket = new Socket(coordinatorHost, coordinatorPort)) {
+        try (Socket socket = new Socket(config.coordinatorHost(), config.coordinatorPort())) {
             TcpMessageReader reader = new TcpMessageReader(socket.getInputStream());
             TcpMessageWriter writer = new TcpMessageWriter(socket.getOutputStream());
 
