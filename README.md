@@ -34,18 +34,20 @@ The system follows a **control-plane / data-plane separation** pattern inspired 
 ┌──────────────────────┐         ┌──────────────────────┐
 │   Coordinator        │         │   Node Server(s)     │
 │   Server             │         │                      │
-│                      │         │  - ChunkStore        │
-│  - File metadata     │         │  - Disk persistence  │
-│  - Node registry     │         │  - Upload/download   │
-│  - Heartbeat sweeper │         │    handler           │
-│  - Lifecycle states  │         │                      │
-│  - Replica placement │         │  Stores NO metadata  │
+│                      │         │  - Chunks stored by  │
+│  - Files + chunk     │         │    SHA-256 hash      │
+│    lists (SQLite)    │         │  - Verifies hashes   │
+│  - Node registry     │         │    on upload         │
+│  - Chunk locations   │◀────────│  - Reports what it   │
+│    (from node        │inventory│    holds             │
+│    reports)          │         │                      │
+│  - Placement         │         │  Stores NO metadata  │
 └──────────────────────┘         └──────────────────────┘
 ```
 
-**Coordinator Server** — Central control-plane that manages file metadata, tracks registered storage nodes via heartbeats, enforces file lifecycle states (INIT → UPLOADING → COMPLETE), and decides replica placement. Importantly, the Coordinator never handles or stores any file content.
+**Coordinator Server** — Central control-plane that keeps the durable metadata (files, the ordered chunk hashes that make up each file, and known nodes) in SQLite. It tracks node health via heartbeats, enforces the file lifecycle (UPLOADING → COMPLETE) and decides placement. It never handles or stores file content. It also doesn't persist which node holds which chunk: nodes report that themselves, so the index is rebuilt automatically after a restart.
 
-**Node Server(s)** — Data-plane storage units that receive, persist, and serve file chunks on disk. Each Node maintains a background connection to the Coordinator for registration and periodic heartbeats. Nodes are stateless with respect to global system state — they simply store and retrieve chunks.
+**Node Server(s)** — Data-plane storage units that store and serve chunks, addressed by the SHA-256 of their content. Each Node keeps a background connection to the Coordinator, over which it registers, sends heartbeats, and reports its full chunk inventory followed by each new chunk as it arrives. Nodes know nothing about files: they simply store and return chunks.
 
 **Client Applications** — Orchestrate file operations by first contacting the Coordinator for metadata and upload/download plans, then communicating directly with Node servers for chunk transfer. The client handles file chunking, multi-node replication during upload, and file reconstruction during download.
 
@@ -55,25 +57,27 @@ The system follows a **control-plane / data-plane separation** pattern inspired 
 
 ### Upload Workflow
 
-1. Client sends `FILES_INIT_REQUEST` to the Coordinator with file metadata (name, size, chunk size).
-2. Coordinator creates a file record, selects up to the replication factor's worth of active Nodes, and returns the upload plan including all target Node endpoints.
-3. Client splits the file into fixed-size chunks (default 4 MiB).
-4. For each chunk, the client uploads to **all** assigned Nodes in parallel via `CHUNK_UPLOAD`, over one reused connection per Node, requiring an `OK` acknowledgement from every target (strict consistency).
-5. Client sends `FILES_COMMIT` to the Coordinator, which transitions the file status to `COMPLETE`.
+1. Client sends `FILES_INIT_REQUEST` to the Coordinator with the file's name, size and chunk size.
+2. Coordinator creates a file record (`UPLOADING`), chooses target Nodes (see [Replication](#replication)) and returns the upload plan.
+3. Client splits the file into fixed-size chunks (default 4 MiB) and hashes each one (SHA-256).
+4. Each chunk is uploaded with `CHUNK_UPLOAD` to **all** targets in parallel, over one reused connection per Node. Every target must acknowledge (strict consistency). Nodes recompute the hash and reject mismatched data, and a chunk a Node already holds isn't stored twice.
+5. Client sends `FILES_COMMIT` with the ordered chunk hashes. The Coordinator checks that every chunk is held by at least one Node, then marks the file `COMPLETE`. If a Node hasn't reported a just-stored chunk yet, the reply is `MISSING_CHUNKS` and the client retries shortly.
 
 ### Download Workflow
 
 1. Client sends `FILES_GET_REQUEST` with the file ID.
-2. Coordinator returns file metadata and all available download sources (replica Node endpoints).
-3. Client downloads chunks sequentially over one reused connection per source, trying sources in order. If a Node fails, the client skips it and falls back to the next replica transparently.
-4. Chunks are written in order to a temporary file, which is moved into place only once the whole file has arrived.
+2. Coordinator returns the file's metadata and, for every chunk, which `UP` Nodes hold it.
+3. Client fetches each chunk from one of its holders and **verifies it against its hash**:
+   - If a Node is unreachable, it's skipped for the rest of the download.
+   - If a Node returns a missing or corrupted chunk, only that copy is skipped, and the next holder is tried.
+4. Chunks are written in order to a temporary file, which is moved into place only once the whole file has arrived and its size matches.
 
 ### Node Health Monitoring
 
 - Each Node sends periodic heartbeats to the Coordinator (every 5 seconds).
 - A background sweeper thread on the Coordinator marks Nodes as `DOWN` if no heartbeat is received within 15 seconds.
 - Only Nodes with `UP` status are selected for new file uploads.
-- Each Node keeps a persistent ID in `<dataDir>/node-id`. If the Coordinator restarts and no longer recognises a Node, the Node reconnects and registers again automatically.
+- Each Node keeps a persistent ID in `<dataDir>/node-id`. If the Coordinator restarts, it remembers known Nodes as `DOWN` until each one reconnects, registers again and re-sends its chunk inventory.
 
 ---
 
@@ -97,40 +101,45 @@ The JSON header contains a `type` field (message discriminator), a `data` field 
 |---|---|---|
 | `FILES_INIT_REQUEST` | Client → Coordinator | Initiate file upload |
 | `FILES_INIT_RESPONSE` | Coordinator → Client | Return upload plan with Node targets |
-| `CHUNK_UPLOAD` | Client → Node | Upload a chunk (header + binary body) |
+| `CHUNK_UPLOAD` | Client → Node | Store a chunk under its hash (body: chunk bytes) |
 | `CHUNK_UPLOAD_ACK` | Node → Client | Acknowledge chunk persistence |
-| `FILES_COMMIT` | Client → Coordinator | Mark file as complete |
-| `FILES_COMMIT_ACK` | Coordinator → Client | Confirm commit |
-| `FILES_GET_REQUEST` | Client → Coordinator | Request file metadata for download |
-| `FILES_GET_RESPONSE` | Coordinator → Client | Return metadata and download sources |
-| `CHUNK_DOWNLOAD` | Client → Node | Request a specific chunk |
-| `CHUNK_DOWNLOAD_RESPONSE` | Node → Client | Return chunk (header + binary body) |
+| `FILES_COMMIT` | Client → Coordinator | Commit a file (body: ordered chunk hashes, 32 bytes each) |
+| `FILES_COMMIT_ACK` | Coordinator → Client | `OK`, `MISSING_CHUNKS` (retry) or `ERROR` |
+| `FILES_GET_REQUEST` | Client → Coordinator | Request a file for download |
+| `FILES_GET_RESPONSE` | Coordinator → Client | Metadata, plus per chunk its hash and holders (binary body) |
+| `CHUNK_DOWNLOAD` | Client → Node | Request a chunk by hash |
+| `CHUNK_DOWNLOAD_RESPONSE` | Node → Client | Return chunk (body: chunk bytes) |
 | `NODE_REGISTER` | Node → Coordinator | Register a storage node |
 | `NODE_REGISTER_ACK` | Coordinator → Node | Confirm registration |
 | `NODE_HEARTBEAT` | Node → Coordinator | Periodic liveness signal |
 | `NODE_HEARTBEAT_ACK` | Coordinator → Node | Acknowledge heartbeat |
+| `NODE_CHUNKS_ADDED` | Node → Coordinator | Chunks this Node holds (body: hashes); full inventory after registering, then new chunks |
+| `NODE_CHUNKS_ACK` | Coordinator → Node | Acknowledge a chunk report |
 
 ---
 
 ## Replication
 
-The system implements **client-driven synchronous replication** at the file level:
+The system implements **client-driven synchronous replication**:
 
-- When a file upload is initialised, the Coordinator selects up to the replication factor (default: 3) of active Nodes to store replicas.
-- The selected Node endpoints are persisted in `FileMetadata.replicaNodes` and returned to the client as `uploadTargets`.
+- When an upload starts, the Coordinator chooses up to the replication factor (default 3) of `UP` Nodes:
+  - **never two in the same failure domain**, because copies on one machine fail together
+  - the Node with the most free space within each domain
+  - the domains with the most free space first
+- If there are fewer domains than the replication factor, the file gets fewer copies and the client prints a warning.
 - During upload, the client sends each chunk to **all** targets and requires an OK ACK from every Node before proceeding (strict acknowledgement policy).
-- During download, the Coordinator returns all replica Nodes as `downloadSources`. The client tries each source in order, providing transparent failover if a Node is unavailable.
-- If fewer Nodes are available than the replication factor, the system degrades gracefully and uses whatever Nodes are available.
-
-The replication protocol is fully backward-compatible. Legacy fields (`uploadHost`/`uploadPort`, `downloadHost`/`downloadPort`) are still populated for single-node configurations. Clients check for the new `uploadTargets`/`downloadSources` fields first and fall back to legacy if absent.
+- The Coordinator tracks replication **per chunk**, from what Nodes report, not per file. Downloads use any Node holding a chunk and fail over transparently.
 
 ### On-Disk Storage Layout
 
-Each Node stores chunks in a deterministic directory structure:
+Each Node stores chunks under their SHA-256 hash, two directory levels deep so no single directory grows too large:
 
 ```
-<baseDir>/chunks/<fileId>/<chunkIndex>.bin
+<dataDir>/node-id
+<dataDir>/chunks/ab/cd/abcd…(64 hex characters)
 ```
+
+Chunks are written to a temporary file and renamed into place, so a crash never leaves a partial chunk under a valid name. The Coordinator keeps its metadata in `<coordinator data dir>/metadata.db`.
 
 ---
 
@@ -144,6 +153,8 @@ src/main/java/com/leo/dfss/
 │   ├── UploadOrchestratorClient.java      # Client-side upload orchestration
 │   ├── DownloadOrchestratorClient.java    # Client-side download orchestration
 │   └── NodeSession.java                   # One reusable connection to a Node
+├── common/
+│   └── ChunkHashes.java                   # SHA-256 chunk addresses and binary hash lists
 ├── config/
 │   ├── CoordinatorConfig.java             # Coordinator settings
 │   ├── NodeConfig.java                    # Node settings
@@ -151,12 +162,15 @@ src/main/java/com/leo/dfss/
 ├── coordinator/
 │   ├── CoordinatorServer.java             # Central control-plane server
 │   ├── CoordinatorConnection.java         # Per-connection protocol handler
-│   ├── FileMetadata.java                  # In-memory file metadata record
-│   └── NodeInfo.java                      # In-memory node health/status record
+│   ├── ChunkLocations.java                # Which node holds which chunk (from node reports)
+│   ├── FileMetadata.java                  # File record and lifecycle
+│   └── NodeInfo.java                      # Node health/status record
+├── meta/
+│   └── MetadataStore.java                 # SQLite persistence for files, chunk lists, nodes
 ├── node/
 │   ├── NodeServer.java                    # Data-plane storage server
 │   ├── NodeConnection.java                # Per-connection chunk handler
-│   └── ChunkStore.java                    # Disk persistence layer
+│   └── ChunkStore.java                    # Content-addressed chunk storage on disk
 ├── protocol/
 │   ├── Message.java                       # Wire protocol header envelope
 │   ├── FilesInitRequest.java              # Upload initiation request
@@ -172,7 +186,10 @@ src/main/java/com/leo/dfss/
 │   ├── NodeRegisterRequest.java           # Node registration request
 │   ├── NodeRegisterAck.java               # Node registration acknowledgement
 │   ├── NodeHeartbeat.java                 # Node heartbeat message
-│   └── NodeHeartbeatAck.java              # Heartbeat acknowledgement
+│   ├── NodeHeartbeatAck.java              # Heartbeat acknowledgement
+│   ├── NodeChunksAdded.java               # Node chunk inventory report
+│   ├── NodeEndpoint.java                  # Where a node can be reached
+│   └── ChunkPlacements.java               # Binary per-chunk holder lists
 └── transport/
     ├── TcpMessageReader.java              # Framed message deserialiser
     ├── TcpMessageWriter.java              # Framed message serialiser
@@ -181,15 +198,23 @@ src/main/java/com/leo/dfss/
 src/test/java/com/leo/dfss/
 ├── client/
 │   └── SafeFileNameTest.java              # Server-supplied file names can't choose a path
+├── common/
+│   └── ChunkHashesTest.java               # Hashing (known vector) and hash list packing
 ├── coordinator/
-│   └── FileMetadataTest.java              # Unit tests for chunk calculation
+│   ├── FileMetadataTest.java              # Chunk count calculation
+│   └── PlacementTest.java                 # Failure-domain and free-space aware placement
+├── meta/
+│   └── MetadataStoreTest.java             # Metadata survives reopening; commit-once
 ├── node/
-│   └── ChunkStoreTest.java                # Disk persistence and file ID validation
+│   └── ChunkStoreTest.java                # Content addressing, dedup, integrity, path safety
+├── protocol/
+│   └── ChunkPlacementsTest.java           # Placement encoding
 ├── transport/
 │   └── TcpMessageReaderTest.java          # Framing and message size limits
 └── integration/
     ├── TestCluster.java                   # Starts a Coordinator + N Nodes on free ports
     ├── UploadDownloadRoundTripTest.java   # End-to-end uploads, downloads and failover
+    ├── ContentAddressingTest.java         # Dedup, corrupted copies, Coordinator restart, empty files
     ├── NodeLifecycleTest.java             # Node IDs, registration and re-registration
     └── DfsCliTest.java                    # The `dfs` command end to end
 ```
@@ -215,17 +240,19 @@ This runs the tests and builds `target/dfs.jar`, a single runnable jar.
 
 Start each component in its own terminal:
 
-**1. Start the Coordinator (port 9000):**
+**1. Start the Coordinator (port 9000, metadata in `coordinator-data/`):**
 ```bash
 java -jar target/dfs.jar coordinator
 ```
 
 **2. Start Node Server(s):**
 ```bash
-java -jar target/dfs.jar node --port 9101 --data-dir data/node1
-java -jar target/dfs.jar node --port 9102 --data-dir data/node2
-java -jar target/dfs.jar node --port 9103 --data-dir data/node3
+java -jar target/dfs.jar node --port 9101 --data-dir data/node1 --failure-domain test1
+java -jar target/dfs.jar node --port 9102 --data-dir data/node2 --failure-domain test2
+java -jar target/dfs.jar node --port 9103 --data-dir data/node3 --failure-domain test3
 ```
+
+Copies are never placed twice in the same failure domain, which defaults to the machine's host name. On real hosts, leave it unset. When testing several Nodes on one machine, give each Node its own domain as above, or every file gets a single copy.
 
 For nodes on other machines, add `--coordinator <host>:9000`. If clients should reach a node at a different address than the one it uses to connect to the Coordinator, add `--advertise-host`.
 
@@ -252,11 +279,15 @@ mvn test
 The test suite includes:
 
 - **TcpMessageReaderTest**: framing round trip, and rejection of oversized or malformed messages before any large allocation.
-- **ChunkStoreTest**: disk read/write round trip, and rejection of file IDs that could escape the data directory.
+- **ChunkHashesTest**, **ChunkPlacementsTest**: hashing against a known test vector, and the binary encodings.
+- **ChunkStoreTest**: content-addressed storage, deduplication, rejection of data that doesn't match its hash, and rejection of invalid hashes (path safety).
+- **MetadataStoreTest**: files, chunk lists and nodes survive reopening the database; a file can be committed only once.
+- **PlacementTest**: never two copies in one failure domain, emptiest nodes first, `DOWN` nodes skipped, and a warning when there are too few domains.
 - **SafeFileNameTest**: a file name sent by the server can't make the client write outside the output directory.
-- **FileMetadataTest**: chunk count calculation with ceiling division.
-- **UploadDownloadRoundTripTest**: starts a Coordinator and three Nodes on free ports and checks SHA-256 equality after a round trip for a 120 KB file split into many chunks and a 50 MiB file. It also checks that a download succeeds after two of the three Nodes are stopped, and that uploading with no Nodes fails with a clear error.
-- **NodeLifecycleTest**: Node IDs survive restarts, Nodes register their real port and failure domain, and Nodes re-register after a Coordinator restart.
+- **FileMetadataTest**: chunk count calculation, including empty files.
+- **UploadDownloadRoundTripTest**: round trips for a 120 KB file split into many chunks and a 50 MiB file; a download after two of three Nodes are stopped; a clear error with no Nodes.
+- **ContentAddressingTest**: identical data is stored once; corrupted copies are detected and a good copy is used; files survive a Coordinator restart (state rebuilt from SQLite plus node reports); empty files round trip.
+- **NodeLifecycleTest**: Node IDs survive restarts, Nodes register their real port and failure domain, and Nodes come back `UP` after a Coordinator restart.
 - **DfsCliTest**: `dfs put` and `dfs get` end to end, and non-zero exit codes on bad input.
 
 ---
@@ -268,6 +299,7 @@ Every setting can be passed as a flag or as an environment variable. A flag wins
 | Setting | Flag | Environment variable | Default |
 |---|---|---|---|
 | Coordinator listen port | `coordinator --port` | `DFS_PORT` | `9000` |
+| Coordinator data directory | `coordinator --data-dir` | `DFS_DATA_DIR` | `coordinator-data` |
 | Replication factor | `coordinator --replication-factor` | `DFS_REPLICATION_FACTOR` | `3` |
 | Node listen port | `node --port` | `DFS_PORT` | `9100` |
 | Node data directory | `node --data-dir` | `DFS_DATA_DIR` | `node-data` |
@@ -290,13 +322,10 @@ Fixed limits:
 
 ### Current Limitations
 
-- **In-memory metadata** — File records and node registry are lost on Coordinator restart. No persistent storage layer is implemented.
-- **Single Coordinator** — The Coordinator is a single point of failure. If it goes down, new uploads/downloads cannot be initiated (though existing Node data is preserved on disk).
+- **Single Coordinator** — The Coordinator's metadata survives restarts, but it lives on one host. If that host's disk is lost, the chunks on the Nodes can't be reassembled into files. Replicating the metadata across hosts is planned (Phases 4–5).
 - **No encryption** — Data is transmitted and stored in plaintext. No authentication or access control is implemented.
-- **No integrity checks** — Stored chunks aren't checksummed, so silent disk corruption isn't detected.
-- **No self-healing** — If a Node is lost, its copies aren't recreated elsewhere.
+- **No self-healing** — If a Node is lost, its copies aren't recreated elsewhere. Corruption is caught when a chunk is read, but nothing scans for it in the background yet (Phase 3).
 - **Sequential chunk downloads** — Chunks are downloaded one at a time rather than in parallel across replicas.
-- **Static node selection** — Replica placement uses first-available selection rather than load-balanced or capacity-aware placement.
 
 ### Planned / Future Enhancements
 
