@@ -245,7 +245,7 @@ Key parameters are currently defined as constants (prototype scope):
 |---|---|---|
 | Coordinator port | `9000` | `CoordinatorServer`, client classes |
 | Default chunk size | `4096` bytes (4 KB) | `UploadOrchestratorClient` |
-| Replication factor | `2` | `CoordinatorServer.REPLICATION_FACTOR` |
+| Replication factor | `3` | `CoordinatorServer.REPLICATION_FACTOR` |
 | Heartbeat interval | `5000` ms | `NodeServer` |
 | Heartbeat timeout | `15000` ms | `CoordinatorServer.HEARTBEAT_TIMEOUT_MS` |
 | Sweeper interval | `5000` ms | `CoordinatorServer.SWEEP_INTERVAL_MS` |
