@@ -298,13 +298,9 @@ Fixed limits:
 - **Sequential chunk downloads** — Chunks are downloaded one at a time rather than in parallel across replicas.
 - **Static node selection** — Replica placement uses first-available selection rather than load-balanced or capacity-aware placement.
 
-### Planned / Future Enhancements
+### Roadmap
 
-- End-to-end encryption (AES-256) for data confidentiality in transit and at rest.
-- Persistent metadata storage (e.g., embedded database) for Coordinator durability.
-- Parallel chunk downloads across multiple replica Nodes.
-- Load-balanced or round-robin replica placement strategy.
-- Web-based client interface for file management.
+This project is being developed into a self-hosted, encrypted, decentralised backup and storage system. See [docs/ROADMAP.md](docs/ROADMAP.md) for the phases and their status.
 
 ---
 
