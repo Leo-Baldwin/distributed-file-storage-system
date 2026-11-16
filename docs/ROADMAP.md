@@ -4,7 +4,7 @@ Where this project is going: from a final-year university prototype to a **self-
 
 **The core promise:** if any host is lost, both the data and the system itself can be recovered from the hosts that remain.
 
-The dissertation version is preserved at the tag [`v1.0-dissertation`](../../tree/v1.0-dissertation).
+The dissertation version is preserved at the tag [`v1.0-dissertation`](https://github.com/Leo-Baldwin/distributed-file-storage-system/tree/v1.0-dissertation).
 
 ## Design principles
 
