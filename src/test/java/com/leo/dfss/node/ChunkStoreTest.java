@@ -3,8 +3,10 @@ package com.leo.dfss.node;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Random;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -17,7 +19,7 @@ class ChunkStoreTest {
     void writeThenReadChunk_roundTripsBytes() throws Exception {
         ChunkStore store = new ChunkStore(tempDir);
 
-        String fileId = "file-123";
+        String fileId = UUID.randomUUID().toString();
         int chunkIndex = 0;
 
         byte[] data = new byte[8192];
@@ -37,6 +39,20 @@ class ChunkStoreTest {
 
         assertFalse(store.chunkExists(null, 0));
         assertFalse(store.chunkExists("", 0));
-        assertFalse(store.chunkExists("file", -1));
+        assertFalse(store.chunkExists(UUID.randomUUID().toString(), -1));
+    }
+
+    @Test
+    void pathTraversalFileIds_areRejected() {
+        ChunkStore store = new ChunkStore(tempDir.resolve("store"));
+        byte[] data = {1, 2, 3};
+
+        for (String bad : new String[]{"../escaped", "../../etc", "a/b", "file-123", "/abs/path",
+                UUID.randomUUID().toString().toUpperCase()}) {
+            assertThrows(IllegalArgumentException.class, () -> store.writeChunk(bad, 0, data), bad);
+            assertThrows(IllegalArgumentException.class, () -> store.readChunk(bad, 0), bad);
+            assertFalse(store.chunkExists(bad, 0), bad);
+        }
+        assertFalse(Files.exists(tempDir.resolve("escaped")));
     }
 }

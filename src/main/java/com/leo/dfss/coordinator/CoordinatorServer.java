@@ -202,7 +202,14 @@ public class CoordinatorServer {
             return false;
         }
 
-        metadata.setStatus(FileMetadata.Status.COMPLETE);
+        // Only an in-progress upload can be committed (not an unknown, INIT or already-COMPLETE file).
+        // Synchronised on the record so two concurrent commits can't both succeed.
+        synchronized (metadata) {
+            if (metadata.getStatus() != FileMetadata.Status.UPLOADING) {
+                return false;
+            }
+            metadata.setStatus(FileMetadata.Status.COMPLETE);
+        }
 
         System.out.println("Committed file record: " + metadata);
         return true;

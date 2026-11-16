@@ -24,6 +24,12 @@ public class TcpMessageReader {
 
     private static final Gson GSON = new Gson();
 
+    /** Largest JSON header accepted. Headers carry small control payloads only. */
+    public static final int MAX_HEADER_BYTES = 64 * 1024;
+
+    /** Largest binary body accepted. Must be at least as large as the biggest chunk size in use. */
+    public static final int MAX_BODY_BYTES = 16 * 1024 * 1024;
+
     private final DataInputStream in;
 
     /**
@@ -46,7 +52,8 @@ public class TcpMessageReader {
             // 1) Read the 4-byte header length (EOFException indicates end-of-stream)
             int headerLength = in.readInt(); // throws EOFException if stream is closed.
 
-            if (headerLength <= 0) {
+            // Reject before allocating, so a peer can't make us allocate an arbitrary amount of memory
+            if (headerLength <= 0 || headerLength > MAX_HEADER_BYTES) {
                 throw new IOException("Invalid header length: " + headerLength);
             }
 
@@ -57,12 +64,17 @@ public class TcpMessageReader {
             String headerString = new String(headerBytes, StandardCharsets.UTF_8);
 
             // 2b) Parse header JSON into a Message object
-            Message header = GSON.fromJson(headerString, Message.class);
+            Message header;
+            try {
+                header = GSON.fromJson(headerString, Message.class);
+            } catch (com.google.gson.JsonParseException e) {
+                throw new IOException("Invalid header JSON", e);
+            }
             if (header == null) {
                 throw new IOException("Invalid header JSON (parsed null)");
             }
             int bodyLength = header.getBodyLength();
-            if (bodyLength < 0) {
+            if (bodyLength < 0 || bodyLength > MAX_BODY_BYTES) {
                 throw new IOException("Invalid body length: " + bodyLength);
             }
 

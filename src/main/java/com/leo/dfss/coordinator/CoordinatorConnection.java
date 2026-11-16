@@ -147,17 +147,24 @@ public class CoordinatorConnection extends Thread {
             writer.send(new Message("ERROR", "totalSizeBytes must be greater than 0."), null);
             return;
         }
-        if (request.getChunkSizeBytes() <= 0) {
-            writer.send(new Message("ERROR", "chunkSizeBytes must be greater than 0."), null);
+        if (request.getChunkSizeBytes() <= 0 || request.getChunkSizeBytes() > TcpMessageReader.MAX_BODY_BYTES) {
+            writer.send(new Message("ERROR",
+                    "chunkSizeBytes must be between 1 and " + TcpMessageReader.MAX_BODY_BYTES + "."), null);
             return;
         }
 
         // Call Coordinator to initialise file upload with metadata
-        FileMetadata meta =
-                coordinator.initFileUpload(
-                        request.getFilename(),
-                        request.getTotalSizeBytes(),
-                        request.getChunkSizeBytes());
+        FileMetadata meta;
+        try {
+            meta = coordinator.initFileUpload(
+                    request.getFilename(),
+                    request.getTotalSizeBytes(),
+                    request.getChunkSizeBytes());
+        } catch (IllegalStateException e) {
+            // e.g. no storage nodes are UP. Report it instead of letting it kill this connection thread.
+            writer.send(new Message("ERROR", e.getMessage()), null);
+            return;
+        }
 
         // Respond to client with file details
         FilesInitResponse response = new FilesInitResponse();
@@ -224,7 +231,7 @@ public class CoordinatorConnection extends Thread {
         if (!ok) {
             writer.send(new Message(
                     "ERROR",
-                    "Unknown fileId: " + request.getFileId()),
+                    "Unknown fileId or file is not uploading: " + request.getFileId()),
                     null);
             return;
         }
