@@ -56,23 +56,24 @@ The system follows a **control-plane / data-plane separation** pattern inspired 
 ### Upload Workflow
 
 1. Client sends `FILES_INIT_REQUEST` to the Coordinator with file metadata (name, size, chunk size).
-2. Coordinator creates a file record, selects up to `REPLICATION_FACTOR` active Nodes, and returns the upload plan including all target Node endpoints.
-3. Client splits the file into fixed-size chunks (default 4 KB).
-4. For each chunk, the client uploads to **all** assigned Nodes via `CHUNK_UPLOAD`, requiring an `OK` acknowledgement from every target (strict consistency).
+2. Coordinator creates a file record, selects up to the replication factor's worth of active Nodes, and returns the upload plan including all target Node endpoints.
+3. Client splits the file into fixed-size chunks (default 4 MiB).
+4. For each chunk, the client uploads to **all** assigned Nodes in parallel via `CHUNK_UPLOAD`, over one reused connection per Node, requiring an `OK` acknowledgement from every target (strict consistency).
 5. Client sends `FILES_COMMIT` to the Coordinator, which transitions the file status to `COMPLETE`.
 
 ### Download Workflow
 
 1. Client sends `FILES_GET_REQUEST` with the file ID.
 2. Coordinator returns file metadata and all available download sources (replica Node endpoints).
-3. Client downloads chunks sequentially, trying each source in order. If a Node is unavailable, the client falls back to the next replica transparently.
-4. Chunks are written in order to reconstruct the original file.
+3. Client downloads chunks sequentially over one reused connection per source, trying sources in order. If a Node fails, the client skips it and falls back to the next replica transparently.
+4. Chunks are written in order to a temporary file, which is moved into place only once the whole file has arrived.
 
 ### Node Health Monitoring
 
 - Each Node sends periodic heartbeats to the Coordinator (every 5 seconds).
 - A background sweeper thread on the Coordinator marks Nodes as `DOWN` if no heartbeat is received within 15 seconds.
 - Only Nodes with `UP` status are selected for new file uploads.
+- Each Node keeps a persistent ID in `<dataDir>/node-id`. If the Coordinator restarts and no longer recognises a Node, the Node reconnects and registers again automatically.
 
 ---
 
@@ -115,7 +116,7 @@ The JSON header contains a `type` field (message discriminator), a `data` field 
 
 The system implements **client-driven synchronous replication** at the file level:
 
-- When a file upload is initialised, the Coordinator selects up to `REPLICATION_FACTOR` (default: 3) active Nodes to store replicas.
+- When a file upload is initialised, the Coordinator selects up to the replication factor (default: 3) of active Nodes to store replicas.
 - The selected Node endpoints are persisted in `FileMetadata.replicaNodes` and returned to the client as `uploadTargets`.
 - During upload, the client sends each chunk to **all** targets and requires an OK ACK from every Node before proceeding (strict acknowledgement policy).
 - During download, the Coordinator returns all replica Nodes as `downloadSources`. The client tries each source in order, providing transparent failover if a Node is unavailable.
@@ -137,9 +138,16 @@ Each Node stores chunks in a deterministic directory structure:
 
 ```
 src/main/java/com/leo/dfss/
+├── cli/
+│   └── Dfs.java                           # The `dfs` command (coordinator | node | put | get)
 ├── client/
 │   ├── UploadOrchestratorClient.java      # Client-side upload orchestration
-│   └── DownloadOrchestratorClient.java    # Client-side download orchestration
+│   ├── DownloadOrchestratorClient.java    # Client-side download orchestration
+│   └── NodeSession.java                   # One reusable connection to a Node
+├── config/
+│   ├── CoordinatorConfig.java             # Coordinator settings
+│   ├── NodeConfig.java                    # Node settings
+│   └── ClientConfig.java                  # Client settings
 ├── coordinator/
 │   ├── CoordinatorServer.java             # Central control-plane server
 │   ├── CoordinatorConnection.java         # Per-connection protocol handler
@@ -171,12 +179,19 @@ src/main/java/com/leo/dfss/
     └── ReceivedMessage.java               # Header + body container
 
 src/test/java/com/leo/dfss/
+├── client/
+│   └── SafeFileNameTest.java              # Server-supplied file names can't choose a path
 ├── coordinator/
 │   └── FileMetadataTest.java              # Unit tests for chunk calculation
 ├── node/
-│   └── ChunkStoreTest.java               # Unit tests for disk persistence
+│   └── ChunkStoreTest.java                # Disk persistence and file ID validation
+├── transport/
+│   └── TcpMessageReaderTest.java          # Framing and message size limits
 └── integration/
-    └── UploadDownloadRoundTripTest.java   # Full end-to-end integration test
+    ├── TestCluster.java                   # Starts a Coordinator + N Nodes on free ports
+    ├── UploadDownloadRoundTripTest.java   # End-to-end uploads, downloads and failover
+    ├── NodeLifecycleTest.java             # Node IDs, registration and re-registration
+    └── DfsCliTest.java                    # The `dfs` command end to end
 ```
 
 ---
@@ -191,35 +206,40 @@ src/test/java/com/leo/dfss/
 ### Build
 
 ```bash
-mvn clean compile
+mvn package
 ```
+
+This runs the tests and builds `target/dfs.jar`, a single runnable jar.
 
 ### Run
 
-Start the components in separate terminal windows:
+Start each component in its own terminal:
 
 **1. Start the Coordinator (port 9000):**
 ```bash
-mvn exec:java -Dexec.mainClass="com.leo.dfss.coordinator.CoordinatorServer"
+java -jar target/dfs.jar coordinator
 ```
 
 **2. Start Node Server(s):**
 ```bash
-# Node 1 on port 9100
-mvn exec:java -Dexec.mainClass="com.leo.dfss.node.NodeServer"
+java -jar target/dfs.jar node --port 9101 --data-dir data/node1
+java -jar target/dfs.jar node --port 9102 --data-dir data/node2
+java -jar target/dfs.jar node --port 9103 --data-dir data/node3
 ```
 
-To run multiple Nodes for replication, modify the port and data directory in `NodeServer.main()` or pass arguments (e.g., run Node 2 on port 9200 with a separate data directory).
+For nodes on other machines, add `--coordinator <host>:9000`. If clients should reach a node at a different address than the one it uses to connect to the Coordinator, add `--advertise-host`.
 
-**3. Upload a file:**
+**3. Upload a file** (prints the file ID):
 ```bash
-mvn exec:java -Dexec.mainClass="com.leo.dfss.client.UploadOrchestratorClient" -Dexec.args="path/to/file.txt"
+java -jar target/dfs.jar put path/to/file.txt
 ```
 
 **4. Download a file:**
 ```bash
-mvn exec:java -Dexec.mainClass="com.leo.dfss.client.DownloadOrchestratorClient" -Dexec.args="<fileId> output/"
+java -jar target/dfs.jar get <fileId> -o output/
 ```
+
+Run `java -jar target/dfs.jar <command> --help` for all options.
 
 ---
 
@@ -231,24 +251,38 @@ mvn test
 
 The test suite includes:
 
-- **FileMetadataTest** — Validates chunk count calculation with ceiling division.
-- **ChunkStoreTest** — Verifies disk read/write round-trip and input validation.
-- **UploadDownloadRoundTripTest** — Full integration test that starts a Coordinator and three Node servers, uploads a 120 KB file, downloads it, and verifies the SHA-256 hash matches the original.
+- **TcpMessageReaderTest**: framing round trip, and rejection of oversized or malformed messages before any large allocation.
+- **ChunkStoreTest**: disk read/write round trip, and rejection of file IDs that could escape the data directory.
+- **SafeFileNameTest**: a file name sent by the server can't make the client write outside the output directory.
+- **FileMetadataTest**: chunk count calculation with ceiling division.
+- **UploadDownloadRoundTripTest**: starts a Coordinator and three Nodes on free ports and checks SHA-256 equality after a round trip for a 120 KB file split into many chunks and a 50 MiB file. It also checks that a download succeeds after two of the three Nodes are stopped, and that uploading with no Nodes fails with a clear error.
+- **NodeLifecycleTest**: Node IDs survive restarts, Nodes register their real port and failure domain, and Nodes re-register after a Coordinator restart.
+- **DfsCliTest**: `dfs put` and `dfs get` end to end, and non-zero exit codes on bad input.
 
 ---
 
 ## Configuration
 
-Key parameters are currently defined as constants (prototype scope):
+Every setting can be passed as a flag or as an environment variable. A flag wins over an environment variable, which wins over the default.
 
-| Parameter | Value | Location |
-|---|---|---|
-| Coordinator port | `9000` | `CoordinatorServer`, client classes |
-| Default chunk size | `4096` bytes (4 KB) | `UploadOrchestratorClient` |
-| Replication factor | `3` | `CoordinatorServer.REPLICATION_FACTOR` |
-| Heartbeat interval | `5000` ms | `NodeServer` |
-| Heartbeat timeout | `15000` ms | `CoordinatorServer.HEARTBEAT_TIMEOUT_MS` |
-| Sweeper interval | `5000` ms | `CoordinatorServer.SWEEP_INTERVAL_MS` |
+| Setting | Flag | Environment variable | Default |
+|---|---|---|---|
+| Coordinator listen port | `coordinator --port` | `DFS_PORT` | `9000` |
+| Replication factor | `coordinator --replication-factor` | `DFS_REPLICATION_FACTOR` | `3` |
+| Node listen port | `node --port` | `DFS_PORT` | `9100` |
+| Node data directory | `node --data-dir` | `DFS_DATA_DIR` | `node-data` |
+| Coordinator address | `--coordinator` (node, put, get) | `DFS_COORDINATOR` | `localhost:9000` |
+| Address clients use to reach a node | `node --advertise-host` | `DFS_ADVERTISE_HOST` | the address the node connects from |
+| Failure domain | `node --failure-domain` | `DFS_FAILURE_DOMAIN` | the machine's host name |
+| Upload chunk size | `put --chunk-size-kib` | `DFS_CHUNK_SIZE_KIB` | `4096` (4 MiB) |
+
+Fixed limits:
+
+| Limit | Value |
+|---|---|
+| Heartbeat interval / timeout / sweep | 5 s / 15 s / 5 s |
+| Maximum message header | 64 KiB |
+| Maximum message body (and so chunk size) | 16 MiB |
 
 ---
 
@@ -259,7 +293,9 @@ Key parameters are currently defined as constants (prototype scope):
 - **In-memory metadata** — File records and node registry are lost on Coordinator restart. No persistent storage layer is implemented.
 - **Single Coordinator** — The Coordinator is a single point of failure. If it goes down, new uploads/downloads cannot be initiated (though existing Node data is preserved on disk).
 - **No encryption** — Data is transmitted and stored in plaintext. No authentication or access control is implemented.
-- **Sequential chunk downloads** — Chunks are downloaded one at a time from a single source rather than in parallel across replicas.
+- **No integrity checks** — Stored chunks aren't checksummed, so silent disk corruption isn't detected.
+- **No self-healing** — If a Node is lost, its copies aren't recreated elsewhere.
+- **Sequential chunk downloads** — Chunks are downloaded one at a time rather than in parallel across replicas.
 - **Static node selection** — Replica placement uses first-available selection rather than load-balanced or capacity-aware placement.
 
 ### Planned / Future Enhancements
@@ -269,7 +305,6 @@ Key parameters are currently defined as constants (prototype scope):
 - Parallel chunk downloads across multiple replica Nodes.
 - Load-balanced or round-robin replica placement strategy.
 - Web-based client interface for file management.
-- Support for larger-scale deployments with configurable host/port via CLI arguments or config files.
 
 ---
 
@@ -278,6 +313,7 @@ Key parameters are currently defined as constants (prototype scope):
 - **Java 21** — Platform and language
 - **TCP Sockets** (`java.net`) — Transport layer communication
 - **Gson 2.11** — JSON serialisation/deserialisation
+- **picocli 4.7** — Command-line interface
 - **Apache Maven** — Build and dependency management
 - **JUnit 5** — Unit and integration testing
 
