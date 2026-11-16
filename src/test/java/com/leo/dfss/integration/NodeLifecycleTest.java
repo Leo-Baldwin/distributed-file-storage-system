@@ -49,7 +49,7 @@ class NodeLifecycleTest {
 
     @Test
     void node_reRegistersAfterCoordinatorRestart() throws Exception {
-        CoordinatorServer first = new CoordinatorServer(CoordinatorConfig.onPort(0));
+        CoordinatorServer first = new CoordinatorServer(CoordinatorConfig.of(0, tempDir.resolve("coord")));
         startDaemon(first::start);
         first.awaitReady(5, TimeUnit.SECONDS);
         int port = first.getPort();
@@ -62,12 +62,14 @@ class NodeLifecycleTest {
 
         // Restart the Coordinator on the same port: it has forgotten every node
         first.shutdown();
-        CoordinatorServer second = new CoordinatorServer(CoordinatorConfig.onPort(port));
+        CoordinatorServer second = new CoordinatorServer(CoordinatorConfig.of(port, tempDir.resolve("coord")));
         startDaemon(second::start);
         second.awaitReady(5, TimeUnit.SECONDS);
 
         try {
-            awaitTrue(() -> second.getNodes().containsKey(node.getNodeId()));
+            // The new Coordinator remembers the node from disk, but only as DOWN until it re-registers
+            assertEquals(NodeInfo.Status.DOWN, second.getNodes().get(node.getNodeId()).getStatus());
+            awaitTrue(() -> second.getNodes().get(node.getNodeId()).getStatus() == NodeInfo.Status.UP);
         } finally {
             node.shutdown();
             second.shutdown();

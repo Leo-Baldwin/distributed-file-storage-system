@@ -1,6 +1,7 @@
 package com.leo.dfss.client;
 
 import com.google.gson.Gson;
+import com.leo.dfss.common.ChunkHashes;
 import com.leo.dfss.protocol.ChunkDownloadRequest;
 import com.leo.dfss.protocol.ChunkUploadAck;
 import com.leo.dfss.protocol.ChunkUploadRequest;
@@ -53,32 +54,38 @@ final class NodeSession implements AutoCloseable {
         }
     }
 
-    /** Uploads one chunk and requires an OK acknowledgement. */
-    void uploadChunk(String fileId, int chunkIndex, byte[] bytes) throws IOException {
-        ChunkUploadRequest req = new ChunkUploadRequest();
-        req.setFileId(fileId);
-        req.setChunkIndex(chunkIndex);
-        req.setBodyLength(bytes.length);
-
-        writer.send(new Message("CHUNK_UPLOAD", gson.toJson(req)), bytes);
+    /** Uploads one chunk under its hash and requires an OK acknowledgement. */
+    void uploadChunk(String hash, byte[] bytes) throws IOException {
+        writer.send(new Message("CHUNK_UPLOAD", gson.toJson(new ChunkUploadRequest(hash))), bytes);
 
         Message header = readResponse();
         if (!"CHUNK_UPLOAD_ACK".equals(header.getType())) {
             throw new IOException("Unexpected response from " + label + ": " + header.getType() + " " + header.getData());
         }
         ChunkUploadAck ack = gson.fromJson(header.getData(), ChunkUploadAck.class);
-        if (!"OK".equalsIgnoreCase(ack.getStatus())) {
-            throw new IOException("Chunk " + chunkIndex + " rejected by " + label + ": " + ack.getMessage());
+        if (!"OK".equalsIgnoreCase(ack.status())) {
+            throw new IOException("Chunk " + hash + " rejected by " + label + ": " + ack.message());
         }
     }
 
-    /** Downloads one chunk's bytes. */
-    byte[] downloadChunk(String fileId, int chunkIndex) throws IOException {
-        ChunkDownloadRequest req = new ChunkDownloadRequest();
-        req.setFileId(fileId);
-        req.setChunkIndex(chunkIndex);
+    /**
+     * The node is reachable but couldn't supply a good copy of one chunk (it doesn't have it, or
+     * its copy failed the integrity check). Other chunks on the same node may be fine.
+     */
+    static final class BadChunkException extends IOException {
+        BadChunkException(String message) {
+            super(message);
+        }
+    }
 
-        writer.send(new Message("CHUNK_DOWNLOAD", gson.toJson(req)), null);
+    /**
+     * Downloads one chunk and verifies it.
+     *
+     * @throws BadChunkException if the node replies but has no good copy of this chunk
+     * @throws IOException       if the connection to the node fails
+     */
+    byte[] downloadChunk(String hash) throws IOException {
+        writer.send(new Message("CHUNK_DOWNLOAD", gson.toJson(new ChunkDownloadRequest(hash))), null);
 
         ReceivedMessage resp = reader.read();
         if (resp == null) {
@@ -86,9 +93,14 @@ final class NodeSession implements AutoCloseable {
         }
         Message header = resp.getHeader();
         if (!"CHUNK_DOWNLOAD_RESPONSE".equals(header.getType())) {
-            throw new IOException("Node " + label + " error: " + header.getType() + " " + header.getData());
+            throw new BadChunkException("Node " + label + " error: " + header.getData());
         }
-        return resp.getBody() == null ? new byte[0] : resp.getBody();
+        byte[] bytes = resp.getBody() == null ? new byte[0] : resp.getBody();
+        // Never trust a single copy: verify every chunk against the hash it is addressed by
+        if (!ChunkHashes.sha256Hex(bytes).equals(hash)) {
+            throw new BadChunkException("Copy on " + label + " failed its integrity check");
+        }
+        return bytes;
     }
 
     private Message readResponse() throws IOException {

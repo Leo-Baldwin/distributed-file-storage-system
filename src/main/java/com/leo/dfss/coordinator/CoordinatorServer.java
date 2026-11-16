@@ -1,13 +1,17 @@
 package com.leo.dfss.coordinator;
 
 import com.leo.dfss.config.CoordinatorConfig;
+import com.leo.dfss.meta.MetadataStore;
 
 import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.*;
 
@@ -16,8 +20,11 @@ import java.util.concurrent.*;
  *
  * Responsibilities:
  * - Accepts TCP connections and delegates each connection to a {@link CoordinatorConnection} thread.
- * - Maintains in-memory file metadata (no file bytes are stored here).
- * - Maintains an in-memory registry of active storage nodes and their heartbeat status.
+ * - Keeps durable metadata (files, their chunk lists, known nodes) in a {@link MetadataStore}.
+ * - Keeps an in-memory index of which node holds which chunk ({@link ChunkLocations}), rebuilt
+ *   from the nodes' own reports.
+ * - Tracks node health with heartbeats and chooses where new data is placed.
+ * - Never handles file bytes.
  *
  * Threading model:
  * - One thread per client connection (CoordinatorConnection).
@@ -25,12 +32,14 @@ import java.util.concurrent.*;
  */
 public class CoordinatorServer {
 
+    /** Upper bound on chunks per file, so a file's chunk list fits in one message body. */
+    public static final long MAX_CHUNKS_PER_FILE = 400_000;
+
     private final CoordinatorConfig config;
+    private final MetadataStore store;
+    private final ChunkLocations locations = new ChunkLocations();
 
-    // Global file registry: fileId -> FileMetadata
-    private final Map<String, FileMetadata> files = new ConcurrentHashMap<>();
-
-    // Global node registry: nodeId -> NodeInfo
+    // Node registry: nodeId -> NodeInfo (restored from the store at startup, all DOWN until they register)
     private final Map<String, NodeInfo> nodes = new ConcurrentHashMap<>();
 
     private final ScheduledExecutorService sweeper =
@@ -45,18 +54,23 @@ public class CoordinatorServer {
 
     // Counted down once the server socket is bound (or binding failed)
     private final CountDownLatch ready = new CountDownLatch(1);
+    // Counted down once start() has fully stopped and the metadata store is closed
+    private final CountDownLatch stopped = new CountDownLatch(1);
     private volatile ServerSocket serverSocket;
     private volatile Exception startupError;
 
     private volatile boolean running = true;
 
+    /**
+     * @throws IllegalStateException if the metadata database can't be opened
+     */
     public CoordinatorServer(CoordinatorConfig config) {
         this.config = config;
-    }
-
-    /** Convenience constructor using default settings on the given port. */
-    public CoordinatorServer(int port) {
-        this(CoordinatorConfig.onPort(port));
+        this.store = MetadataStore.open(config.metadataFile());
+        for (MetadataStore.StoredNode n : store.loadNodes()) {
+            nodes.put(n.nodeId(), NodeInfo.restored(n.nodeId(), n.host(), n.port(), n.capacityBytes(),
+                    n.failureDomain(), n.freeBytes(), n.lastSeenEpochMs()));
+        }
     }
 
     public static void main(String[] args) {
@@ -68,7 +82,8 @@ public class CoordinatorServer {
      * This method blocks until the server is stopped or an unrecoverable I/O error occurs.
      */
     public void start() {
-        System.out.println("Starting CoordinatorServer...");
+        System.out.println("Starting CoordinatorServer (metadata " + config.metadataFile().toAbsolutePath()
+                + ", " + nodes.size() + " known node(s))");
 
         try (ServerSocket socket = new ServerSocket(config.port())) {
             serverSocket = socket;
@@ -81,16 +96,13 @@ public class CoordinatorServer {
             int nextConnectionId = 1;
 
             while (running) {
-                // Blocks until a client connects
                 Socket client = socket.accept();
-                System.out.println("Accepted connection from " + client.getRemoteSocketAddress());
 
                 // Create a per-connection handler thread (one thread per client socket)
                 CoordinatorConnection connection =
                         new CoordinatorConnection(client, nextConnectionId++, this);
                 connection.setDaemon(true);
 
-                // Track and start the connection handler thread
                 connections.add(connection);
                 connection.start();
             }
@@ -108,6 +120,8 @@ public class CoordinatorServer {
         } finally {
             sweeper.shutdownNow();
             shutdownAllConnections();
+            store.close();
+            stopped.countDown();
         }
     }
 
@@ -132,22 +146,33 @@ public class CoordinatorServer {
         return s.getLocalPort();
     }
 
-    /** Stops accepting connections, stops the sweeper and closes all open connections. */
+    /**
+     * Stops accepting connections, stops the sweeper, closes all connections and the metadata
+     * store. Returns once the store is closed, so the data directory is safe to reuse or delete.
+     */
     public void shutdown() {
         running = false;
+        if (serverSocket == null) {
+            store.close(); // start() never ran, so its finally block won't close the store
+            return;
+        }
         try {
-            if (serverSocket != null) serverSocket.close();
+            serverSocket.close(); // makes start()'s accept() fail, which runs its cleanup
         } catch (IOException ignored) {
         }
-        sweeper.shutdownNow();
-        shutdownAllConnections();
+        try {
+            if (!stopped.await(10, TimeUnit.SECONDS)) {
+                System.out.println("Coordinator did not stop within 10 s");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     /**
-     * Shuts down all active {@link CoordinatorConnection} threads and clears the in-memory connection registry.
+     * Shuts down all active {@link CoordinatorConnection} threads and clears the connection registry.
      */
     public void shutdownAllConnections() {
-        System.out.println("Shutting down all connections...");
         for (CoordinatorConnection connection : connections) {
             connection.shutdown();
         }
@@ -173,106 +198,129 @@ public class CoordinatorServer {
         }, config.sweepIntervalMs(), config.sweepIntervalMs(), TimeUnit.MILLISECONDS);
     }
 
-    /**
-     * Creates a new in-memory file metadata record and assigns it to active Nodes.
-     *
-     * @param filename       name of the file
-     * @param totalSizeBytes total size of the file
-     * @param chunkSizeBytes size of each chunk
-     * @return the metadata of the file
-     * @throws IllegalStateException if no storage nodes are UP
-     */
-    public FileMetadata initFileUpload(String filename,
-                                       long totalSizeBytes,
-                                       int chunkSizeBytes) {
+    // ------------------------------------------------------------------ files
 
-        List<NodeInfo> replicationNodes = getActiveNodesForReplication();
-        if (replicationNodes.isEmpty()) {
+    /**
+     * The result of starting an upload.
+     *
+     * @param targets nodes every chunk should be written to (one per failure domain)
+     * @param warning non-null when fewer than the replication factor of domains are available
+     */
+    public record UploadPlan(FileMetadata file, List<NodeInfo> targets, String warning) {
+    }
+
+    /**
+     * Creates a file record in the UPLOADING state and chooses where its chunks should go.
+     *
+     * @throws IllegalStateException    if no storage nodes are UP
+     * @throws IllegalArgumentException if the file would have too many chunks
+     */
+    public UploadPlan initFileUpload(String filename, long totalSizeBytes, int chunkSizeBytes) {
+        if (FileMetadata.totalChunks(totalSizeBytes, chunkSizeBytes) > MAX_CHUNKS_PER_FILE) {
+            throw new IllegalArgumentException("File would have more than " + MAX_CHUNKS_PER_FILE
+                    + " chunks; use a larger chunk size");
+        }
+
+        List<NodeInfo> targets = selectPlacement(config.replicationFactor());
+        if (targets.isEmpty()) {
             throw new IllegalStateException("No active storage nodes available");
         }
-
-        String fileId = UUID.randomUUID().toString();
-
-        FileMetadata metadata =
-                new FileMetadata(fileId, filename, totalSizeBytes, chunkSizeBytes);
-
-        metadata.setStatus(FileMetadata.Status.UPLOADING);
-
-        // Store selected replica endpoints in metadata (file-level replication)
-        List<FileMetadata.NodeEndpoint> replicaNodes = new ArrayList<>();
-        for (NodeInfo node : replicationNodes) {
-            replicaNodes.add(new FileMetadata.NodeEndpoint(node.getNodeId(), node.getHost(), node.getPort()));
+        String warning = null;
+        if (targets.size() < config.replicationFactor()) {
+            warning = "Only " + targets.size() + " failure domain(s) available, so this file gets "
+                    + targets.size() + " of " + config.replicationFactor() + " copies";
         }
-        metadata.setReplicaNodes(replicaNodes);
 
-        // Backward compatibility: keep legacy single-node fields populated with the first replica
-        FileMetadata.NodeEndpoint primary = replicaNodes.get(0);
-        metadata.setStorageHost(primary.getHost());
-        metadata.setStoragePort(primary.getPort());
+        FileMetadata file = new FileMetadata(UUID.randomUUID().toString(), filename, totalSizeBytes,
+                chunkSizeBytes, FileMetadata.Status.UPLOADING, System.currentTimeMillis());
+        store.insertFile(file);
 
-        files.put(fileId, metadata);
-
-        System.out.println("New file record created: " + metadata);
-        return metadata;
+        System.out.println("Upload started: " + file.fileName() + " (" + file.fileId() + ") -> "
+                + targets.stream().map(NodeInfo::getNodeId).toList());
+        return new UploadPlan(file, targets, warning);
     }
 
     /**
-     * Returns up to the configured replication factor of active nodes for storing replicas.
-     * If fewer nodes are available than the replication factor,
-     * the method degrades gracefully and returns the available nodes.
-     * (Phase 2 replaces this with capacity- and failure-domain-aware placement.)
+     * Chooses up to {@code copies} UP nodes for new data:
+     * - never two in the same failure domain (copies on one machine fail together),
+     * - within a domain, the node with the most free space,
+     * - domains ordered by that free space, so new data goes where there is most room.
      */
-    public List<NodeInfo> getActiveNodesForReplication() {
-
-        List<NodeInfo> result = new ArrayList<>();
-
+    List<NodeInfo> selectPlacement(int copies) {
+        Map<String, NodeInfo> bestPerDomain = new HashMap<>();
         for (NodeInfo node : nodes.values()) {
-            if (node.getStatus() == NodeInfo.Status.UP) {
-                result.add(node);
-
-                if (result.size() == config.replicationFactor()) {
-                    break;
-                }
+            if (node.getStatus() != NodeInfo.Status.UP) {
+                continue;
             }
+            bestPerDomain.merge(node.getFailureDomain(), node,
+                    (a, b) -> a.getFreeBytes() >= b.getFreeBytes() ? a : b);
         }
-        return result;
+        List<NodeInfo> candidates = new ArrayList<>(bestPerDomain.values());
+        candidates.sort(Comparator.comparingLong(NodeInfo::getFreeBytes).reversed()
+                .thenComparing(NodeInfo::getNodeId));
+        return candidates.subList(0, Math.min(copies, candidates.size()));
+    }
+
+    /** Outcome of a commit attempt. */
+    public record CommitOutcome(String status, int missingChunks, String message) {
+        public boolean ok() {
+            return "OK".equals(status);
+        }
     }
 
     /**
-     * Handles FILES_COMMIT by marking the file metadata record as COMPLETE.
+     * Commits a file: checks its chunk list and that every chunk is held by at least one node,
+     * then stores the list and marks the file COMPLETE.
      *
-     * @param fileId identifier for the file being committed
-     * @return true if successfully committed, else false.
+     * If some chunks haven't been reported by nodes yet, returns MISSING_CHUNKS so the client can
+     * retry shortly (nodes report new chunks within a fraction of a second).
      */
-    public boolean commitFile(String fileId) {
-
-        FileMetadata metadata = files.get(fileId);
-        if (metadata == null) {
-            return false;
+    public CommitOutcome commitFile(String fileId, List<String> chunkHashes) {
+        Optional<FileMetadata> file = store.getFile(fileId);
+        if (file.isEmpty()) {
+            return new CommitOutcome("ERROR", 0, "Unknown fileId: " + fileId);
+        }
+        if (file.get().status() != FileMetadata.Status.UPLOADING) {
+            return new CommitOutcome("ERROR", 0, "File is not uploading: " + fileId);
+        }
+        if (chunkHashes.size() != file.get().totalChunks()) {
+            return new CommitOutcome("ERROR", 0, "Expected " + file.get().totalChunks()
+                    + " chunk hashes but got " + chunkHashes.size());
         }
 
-        // Only an in-progress upload can be committed (not an unknown, INIT or already-COMPLETE file).
-        // Synchronised on the record so two concurrent commits can't both succeed.
-        synchronized (metadata) {
-            if (metadata.getStatus() != FileMetadata.Status.UPLOADING) {
-                return false;
-            }
-            metadata.setStatus(FileMetadata.Status.COMPLETE);
+        int missing = locations.countUnlocated(chunkHashes);
+        if (missing > 0) {
+            return new CommitOutcome("MISSING_CHUNKS", missing, missing + " chunk(s) not yet held by any node");
         }
 
-        System.out.println("Committed file record: " + metadata);
-        return true;
+        if (!store.commitFile(fileId, chunkHashes, System.currentTimeMillis())) {
+            return new CommitOutcome("ERROR", 0, "File is not uploading: " + fileId);
+        }
+        System.out.println("Committed " + file.get().fileName() + " (" + fileId + "), "
+                + chunkHashes.size() + " chunk(s)");
+        return new CommitOutcome("OK", 0, "File committed");
     }
 
+    public Optional<FileMetadata> getFile(String fileId) {
+        return store.getFile(fileId);
+    }
+
+    /** @return the committed file's chunk hashes, in order */
+    public List<String> getFileChunks(String fileId) {
+        return store.getFileChunks(fileId);
+    }
+
+    public ChunkLocations getChunkLocations() {
+        return locations;
+    }
+
+    // ------------------------------------------------------------------ nodes
+
     /**
-     * Handles NODE_REGISTER. Re-registering an existing nodeId (e.g. after a node restart)
-     * replaces its record and marks it UP.
+     * Handles NODE_REGISTER. Re-registering an existing nodeId (e.g. after a node or Coordinator
+     * restart) replaces its record, marks it UP and forgets its chunk list, which the node then
+     * re-sends in full.
      *
-     * @param nodeId        nodes unique identifier
-     * @param host          address clients use to reach the node
-     * @param port          servers data port
-     * @param capacityBytes the nodes storage capacity in bytes
-     * @param failureDomain what the node fails together with (usually its machine)
      * @return true if node registered with CoordinatorServer successfully
      */
     public boolean registerNode(String nodeId, String host, int port, long capacityBytes, String failureDomain) {
@@ -284,9 +332,11 @@ public class CoordinatorServer {
 
         String domain = (failureDomain == null || failureDomain.isBlank()) ? nodeId : failureDomain;
         NodeInfo node = new NodeInfo(nodeId, host, port, capacityBytes, domain, now);
+        locations.clearNode(nodeId);
         nodes.put(nodeId, node);
+        persist(node);
 
-        System.out.println("Node " + node.getNodeId() + " is registered at " + host + ":" + port
+        System.out.println("Node " + node.getNodeId() + " registered at " + host + ":" + port
                 + " (domain " + domain + ")");
         return true;
     }
@@ -294,36 +344,37 @@ public class CoordinatorServer {
     /**
      * Handles NODE_HEARTBEAT.
      *
-     * @param nodeId           unique identifier for the node that sent the heartbeat message
-     * @param timeStampEpochMs the timestamp that the heartbeat was sent by the node
-     * @param freeBytes        free space reported by the node (ignored if not positive)
-     * @return true if heartbeat is successfully updated for that nodes NodeInfo registry, else false
+     * @return true if the node is known, else false (the node will then re-register)
      */
     public boolean handleHeartbeat(String nodeId, long timeStampEpochMs, long freeBytes) {
-        NodeInfo node = nodes.get(nodeId); // Retrieve node by its ID
+        NodeInfo node = nodes.get(nodeId);
         if (node == null) {
-            return false; // unknown node (e.g. the Coordinator restarted); the node will re-register
+            return false;
         }
-
         node.updateHeartbeat(timeStampEpochMs, freeBytes);
+        persist(node);
         return true;
     }
 
     /**
-     * Returns the first Node in the registry that is currently marked {@code UP}.
+     * Handles NODE_CHUNKS_ADDED: the node now holds these chunks.
+     *
+     * @return false if the node is unknown (it must register first)
      */
-    public NodeInfo getAnyActiveNode() {
-        for (NodeInfo node : nodes.values()) {
-            if (node.getStatus() == NodeInfo.Status.UP) return node;
+    public boolean chunksAdded(String nodeId, List<String> hashes) {
+        if (!nodes.containsKey(nodeId)) {
+            return false;
         }
-        return null;
+        locations.add(nodeId, hashes);
+        return true;
     }
 
-    /**
-     * Returns the current in-memory node registry.
-     *
-     * @return map of nodeId to {@link NodeInfo}
-     */
+    private void persist(NodeInfo n) {
+        store.upsertNode(new MetadataStore.StoredNode(n.getNodeId(), n.getHost(), n.getPort(),
+                n.getFailureDomain(), n.getCapacityBytes(), n.getFreeBytes(), n.getLastSeenEpochMs()));
+    }
+
+    /** @return the node registry (nodeId → NodeInfo) */
     public Map<String, NodeInfo> getNodes() {
         return nodes;
     }
@@ -331,15 +382,5 @@ public class CoordinatorServer {
     /** @return number of nodes currently marked UP */
     public long countActiveNodes() {
         return nodes.values().stream().filter(n -> n.getStatus() == NodeInfo.Status.UP).count();
-    }
-
-    /**
-     * Method to lookup metadata of file by fileId.
-     *
-     * @param fileId identifier of file being retrieved
-     * @return the metadata of specified file
-     */
-    public FileMetadata getFile(String fileId) {
-        return files.get(fileId);
     }
 }

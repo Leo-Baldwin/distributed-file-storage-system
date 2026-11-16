@@ -2,6 +2,7 @@ package com.leo.dfss.node;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
+import com.leo.dfss.common.ChunkHashes;
 import com.leo.dfss.protocol.*;
 import com.leo.dfss.transport.ReceivedMessage;
 import com.leo.dfss.transport.TcpMessageReader;
@@ -9,6 +10,7 @@ import com.leo.dfss.transport.TcpMessageWriter;
 
 import java.io.IOException;
 import java.net.Socket;
+import java.util.function.Consumer;
 
 /**
  * Per-connection handler for a NodeServer.
@@ -30,6 +32,7 @@ public class NodeConnection extends Thread {
     private final Socket socket;
     private final int connectionId;
     private final ChunkStore chunkStore;
+    private final Consumer<String> onChunkStored; // called with the hash of each newly stored chunk
 
     private volatile boolean running = true;
 
@@ -39,17 +42,17 @@ public class NodeConnection extends Thread {
      * @param socket        connected client socket
      * @param connectionId  identifier used for logging/debugging
      * @param chunkStore    storage component responsible for chunk persistence
+     * @param onChunkStored called with the hash of every chunk newly written to disk
      */
-    public NodeConnection(Socket socket, int connectionId, ChunkStore chunkStore) {
+    public NodeConnection(Socket socket, int connectionId, ChunkStore chunkStore, Consumer<String> onChunkStored) {
         this.socket = socket;
         this.connectionId = connectionId;
         this.chunkStore = chunkStore;
+        this.onChunkStored = onChunkStored;
     }
 
     @Override
     public void run() {
-
-        System.out.println("NodeConnection thread " + connectionId + " started for " + socket.getRemoteSocketAddress());
 
         try {
             TcpMessageReader reader = new TcpMessageReader(socket.getInputStream());
@@ -62,8 +65,7 @@ public class NodeConnection extends Thread {
                 // Read the next framed protocol message from the client
                 ReceivedMessage received = reader.read();
                 if (received == null) {
-                    System.out.println("Client disconnected.");
-                    break;
+                    break; // client disconnected
                 }
 
                 Message header = received.getHeader();
@@ -87,7 +89,7 @@ public class NodeConnection extends Thread {
                         break;
 
                     case "CHUNK_DOWNLOAD":
-                        handleChunkDownload(header, body, writer);
+                        handleChunkDownload(header, writer);
                         break;
 
                     case "QUIT":
@@ -108,124 +110,79 @@ public class NodeConnection extends Thread {
                 socket.close();
             } catch (IOException ignore) {
             }
-            System.out.println("NodeConnection " + connectionId + " closed.");
         }
     }
 
     /**
-     * Handles CHUNK_UPLOAD messages.
-     * Validates metadata and writes the received chunk bytes to disk via ChunkStore.
+     * Handles CHUNK_UPLOAD: stores the body under its hash after checking the bytes match it.
      */
     private void handleChunkUpload(Message header, byte[] body, TcpMessageWriter writer) throws IOException {
-        String data = header.getData();
-        if (data == null) {
-            writer.send(new Message("ERROR", "Missing message data"), null);
-            return;
-        }
-
         ChunkUploadRequest request;
-
         try {
-            request = gson.fromJson(data, ChunkUploadRequest.class);
+            request = gson.fromJson(header.getData(), ChunkUploadRequest.class);
         } catch (JsonSyntaxException e) {
             writer.send(new Message("ERROR", "Invalid data format for CHUNK_UPLOAD"), null);
             return;
         }
-
-        if (request.getFileId() == null || request.getFileId().isBlank()) {
-            writer.send(new Message("ERROR", "CHUNK_UPLOAD missing fileId"), null);
+        if (request == null || !ChunkHashes.isValid(request.hash())) {
+            writer.send(new Message("ERROR", "CHUNK_UPLOAD requires a valid chunk hash"), null);
+            return;
+        }
+        String hash = request.hash();
+        if (body == null) {
+            sendUploadAck(writer, hash, "ERROR", "Missing chunk body");
             return;
         }
 
-        if (request.getChunkIndex() < 0) {
-            writer.send(new Message("ERROR", "Invalid chunkIndex"), null);
-            return;
-        }
-
-        if (request.getBodyLength() <= 0) {
-            writer.send(new Message("ERROR", "Invalid bodyLength"), null);
-            return;
-        }
-
-        // Validate that binary body matches declared bodyLength in header
-        if (body == null || body.length != request.getBodyLength()) {
-            writer.send(new Message("ERROR", "Body length does not match length specified in header"), null);
-            return;
-        }
-
-        // Persist chunk bytes to disk using ChunkStore abstraction
         try {
-            chunkStore.writeChunk(request.getFileId(), request.getChunkIndex(), body);
-        } catch (Exception e) {
-            // Acknowledge chunk upload error
-            ChunkUploadAck ack = new ChunkUploadAck();
-            ack.setFileId(request.getFileId());
-            ack.setChunkIndex(request.getChunkIndex());
-            ack.setStatus("ERROR");
-            ack.setMessage("Failed to write chunk");
-
-            writer.send(new Message("CHUNK_UPLOAD_ACK", gson.toJson(ack)), null);
+            if (chunkStore.put(hash, body)) {
+                onChunkStored.accept(hash); // tell the Coordinator this node now holds it
+            }
+        } catch (IllegalArgumentException e) {
+            sendUploadAck(writer, hash, "ERROR", e.getMessage()); // e.g. bytes don't match the hash
+            return;
+        } catch (IOException e) {
+            sendUploadAck(writer, hash, "ERROR", "Failed to write chunk");
             return;
         }
 
-        // Acknowledge successful chunk persistence
-        ChunkUploadAck ack = new ChunkUploadAck();
-        ack.setFileId(request.getFileId());
-        ack.setChunkIndex(request.getChunkIndex());
-        ack.setStatus("OK");
-        ack.setMessage("Chunk uploaded successfully");
+        sendUploadAck(writer, hash, "OK", "Stored");
+    }
 
-        writer.send(new Message("CHUNK_UPLOAD_ACK", gson.toJson(ack)), null);
+    private void sendUploadAck(TcpMessageWriter writer, String hash, String status, String message) throws IOException {
+        writer.send(new Message("CHUNK_UPLOAD_ACK", gson.toJson(new ChunkUploadAck(hash, status, message))), null);
     }
 
     /**
-     * Handles CHUNK_DOWNLOAD messages.
-     * Reads the requested chunk from disk and returns it to the client.
+     * Handles CHUNK_DOWNLOAD: returns the chunk with the requested hash.
      */
-    private void handleChunkDownload(Message header, byte[] body, TcpMessageWriter writer) throws IOException {
-        String data = header.getData();
-
-        if (data == null || data.isBlank()) {
-            writer.send(new Message("ERROR", "CHUNK_DOWNLOAD requires JSON data"), null);
-            return;
-        }
-
+    private void handleChunkDownload(Message header, TcpMessageWriter writer) throws IOException {
         ChunkDownloadRequest request;
-
         try {
-            request = gson.fromJson(data, ChunkDownloadRequest.class);
-        } catch (Exception e) {
+            request = gson.fromJson(header.getData(), ChunkDownloadRequest.class);
+        } catch (JsonSyntaxException e) {
             writer.send(new Message("ERROR", "Invalid JSON for CHUNK_DOWNLOAD"), null);
             return;
         }
+        if (request == null || !ChunkHashes.isValid(request.hash())) {
+            writer.send(new Message("ERROR", "CHUNK_DOWNLOAD requires a valid chunk hash"), null);
+            return;
+        }
 
-        // Read requested chunk bytes from disk
         byte[] chunkBytes;
         try {
-            chunkBytes = chunkStore.readChunk(
-                    request.getFileId(),
-                    request.getChunkIndex()
-            );
-        } catch (Exception e) {
+            chunkBytes = chunkStore.get(request.hash());
+        } catch (IOException e) {
             writer.send(new Message("ERROR", "Failed to read chunk: " + e.getMessage()), null);
             return;
         }
-
         if (chunkBytes == null) {
-            writer.send(new Message("ERROR", "Chunk not found"), null);
+            writer.send(new Message("ERROR", "Chunk not found: " + request.hash()), null);
             return;
         }
 
-        ChunkDownloadResponse response = new ChunkDownloadResponse();
-        response.setStatus("OK");
-        response.setMessage("Chunk read");
-        response.setBodyLength(chunkBytes.length);
-
-        // Send metadata header + raw binary chunk bytes back to client
-        writer.send(new Message(
-                "CHUNK_DOWNLOAD_RESPONSE",
-                gson.toJson(response)),
-                chunkBytes);
+        ChunkDownloadResponse response = new ChunkDownloadResponse(request.hash(), "OK", "Chunk read");
+        writer.send(new Message("CHUNK_DOWNLOAD_RESPONSE", gson.toJson(response)), chunkBytes);
     }
 
     /**

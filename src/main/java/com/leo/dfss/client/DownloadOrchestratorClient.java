@@ -1,21 +1,15 @@
 package com.leo.dfss.client;
 
-import com.google.gson.Gson;
 import com.leo.dfss.config.ClientConfig;
-import com.leo.dfss.protocol.ChunkDownloadRequest;
+import com.leo.dfss.protocol.ChunkPlacements;
 import com.leo.dfss.protocol.FilesGetRequest;
 import com.leo.dfss.protocol.FilesGetResponse;
-import com.leo.dfss.protocol.Message;
-import com.leo.dfss.transport.ReceivedMessage;
-import com.leo.dfss.transport.TcpMessageReader;
-import com.leo.dfss.transport.TcpMessageWriter;
+import com.leo.dfss.protocol.NodeEndpoint;
 
 import java.io.IOException;
-import java.net.Socket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -25,18 +19,14 @@ import java.util.Set;
 /**
  * Client-side download orchestrator.
  *
- * Responsibilities:
- * - Requests file metadata from the Coordinator (FILES_GET_REQUEST).
- * - Downloads each chunk directly from a Node (CHUNK_DOWNLOAD).
- * - Reconstructs the original file locally by writing chunks in order.
- *
- * Replication support:
- * - If the Coordinator provides downloadSources, the client will try them in order per chunk.
- * - If downloadSources is missing/empty, the client falls back to legacy downloadHost/downloadPort.
+ * 1. FILES_GET_REQUEST: the Coordinator returns the file's metadata and, for every chunk, the
+ *    nodes currently holding it.
+ * 2. Each chunk is fetched from one of its holders and verified against its hash. A node that
+ *    fails or returns bad data is skipped and the next holder is tried.
+ * 3. Chunks are written in order to a temporary file, which is moved into place only once the
+ *    whole file has arrived.
  */
 public class DownloadOrchestratorClient {
-
-    private static final Gson gson = new Gson();
 
     private final ClientConfig config;
 
@@ -44,7 +34,7 @@ public class DownloadOrchestratorClient {
         this.config = config;
     }
 
-    /** Uses a Coordinator on localhost at the default port, with the default chunk size. */
+    /** Uses a Coordinator on localhost at the default port. */
     public DownloadOrchestratorClient() {
         this(ClientConfig.defaults());
     }
@@ -54,62 +44,94 @@ public class DownloadOrchestratorClient {
             System.err.println("Usage: DownloadOrchestratorClient <fileId> <outputDir>");
             return;
         }
-
-        String fileId = args[0];
-        Path outputDir = Path.of(args[1]);
-
-        new DownloadOrchestratorClient().downloadFile(fileId, outputDir);
+        new DownloadOrchestratorClient().downloadFile(args[0], Path.of(args[1]));
     }
 
     /**
-     * Performs a full download workflow for the given fileId.
+     * Downloads a file into {@code outputDir}, under the name it was uploaded with.
      *
-     * @param fileId    identifier of the file to download
-     * @param outputDir directory where the reconstructed file should be written
+     * @return the path of the downloaded file
      */
-    public void downloadFile(String fileId, Path outputDir) throws IOException {
-
-        // 1) Ask the Coordinator for file metadata and Node download location(s)
-        FilesGetResponse info = getFileInfo(fileId);
-
-        System.err.println("Downloading file: " + info.getFilename());
-        System.err.println("Total chunks: " + info.getTotalChunks());
-
-        if (info.getDownloadSources() != null && !info.getDownloadSources().isEmpty()) {
-            System.err.println("downloadSources = " + info.getDownloadSources());
+    public Path downloadFile(String fileId, Path outputDir) throws IOException {
+        FilesGetResponse info;
+        List<ChunkPlacements.Placement> placements;
+        try (CoordinatorClient coordinator = CoordinatorClient.connect(config)) {
+            info = coordinator.request("FILES_GET_REQUEST", new FilesGetRequest(fileId), null,
+                    "FILES_GET_RESPONSE", FilesGetResponse.class);
+            List<NodeEndpoint> nodes = info.nodes() == null ? List.of() : info.nodes();
+            placements = ChunkPlacements.decode(coordinator.lastBody(), nodes.size());
         }
+        if (placements.size() != info.totalChunks()) {
+            throw new IOException("Coordinator listed " + placements.size() + " chunks, expected " + info.totalChunks());
+        }
+
+        System.err.println("Downloading " + info.filename() + " (" + info.totalSizeBytes() + " bytes, "
+                + info.totalChunks() + " chunk(s))");
 
         Files.createDirectories(outputDir);
-        Path outputPath = outputDir.resolve(safeFileName(info.getFilename()));
+        Path outputPath = outputDir.resolve(safeFileName(info.filename()));
 
-        // Determine where to download chunks from. Prefer replication sources, fall back to legacy host/port.
-        List<FilesGetResponse.NodeEndpoint> sources = new ArrayList<>();
-        if (info.getDownloadSources() != null && !info.getDownloadSources().isEmpty()) {
-            sources.addAll(info.getDownloadSources());
-        } else {
-            sources.add(new FilesGetResponse.NodeEndpoint("primary", info.getDownloadHost(), info.getDownloadPort()));
-        }
-
-        // 2) Download chunks in order into a temporary file, then move it into place, so a failed
-        //    download never leaves a truncated file under the real name
+        // Write to a temporary file, then move it into place, so a failed download never leaves a
+        // truncated file under the real name
         Path tempPath = Files.createTempFile(outputDir, ".dfs-download-", ".part");
-        Map<FilesGetResponse.NodeEndpoint, NodeSession> sessions = new HashMap<>();
-        Set<FilesGetResponse.NodeEndpoint> failed = new HashSet<>();
+        Map<NodeEndpoint, NodeSession> sessions = new HashMap<>();
+        Set<NodeEndpoint> failed = new HashSet<>();
         try {
             try (var out = Files.newOutputStream(tempPath)) {
-                for (int i = 0; i < info.getTotalChunks(); i++) {
-                    out.write(downloadChunkFromAnySource(sources, sessions, failed, info.getFileId(), i));
+                for (ChunkPlacements.Placement p : placements) {
+                    out.write(downloadChunk(p, info.nodes(), sessions, failed));
                 }
+            }
+            if (Files.size(tempPath) != info.totalSizeBytes()) {
+                throw new IOException("Downloaded " + Files.size(tempPath) + " bytes, expected " + info.totalSizeBytes());
             }
             Files.move(tempPath, outputPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException | RuntimeException e) {
             Files.deleteIfExists(tempPath);
-            throw new RuntimeException("Failed to reconstruct file", e);
+            throw e instanceof IOException io ? io : new IOException("Failed to reconstruct file: " + e.getMessage(), e);
         } finally {
             sessions.values().forEach(NodeSession::close);
         }
 
         System.err.println("Download complete: " + outputPath.toAbsolutePath());
+        return outputPath;
+    }
+
+    /**
+     * Fetches one chunk from any node holding it, reusing one session per node.
+     * - A node whose connection fails is skipped for the rest of this download.
+     * - A node that is reachable but has a bad or missing copy of this chunk is only skipped for
+     *   this chunk: its other chunks may be the only good copies.
+     */
+    private byte[] downloadChunk(ChunkPlacements.Placement placement, List<NodeEndpoint> nodes,
+                                 Map<NodeEndpoint, NodeSession> sessions, Set<NodeEndpoint> failed)
+            throws IOException {
+        IOException lastError = null;
+        for (int index : placement.nodeIndexes()) {
+            NodeEndpoint node = nodes.get(index);
+            if (failed.contains(node)) {
+                continue;
+            }
+            try {
+                NodeSession session = sessions.get(node);
+                if (session == null) {
+                    session = NodeSession.open(node.host(), node.port());
+                    sessions.put(node, session);
+                }
+                return session.downloadChunk(placement.hash());
+            } catch (NodeSession.BadChunkException e) {
+                lastError = e;
+                System.err.println("Chunk " + placement.hash() + ": " + e.getMessage() + ", trying another copy...");
+            } catch (IOException e) {
+                lastError = e;
+                failed.add(node);
+                NodeSession broken = sessions.remove(node);
+                if (broken != null) broken.close();
+                System.err.println("Node " + node + " failed (" + e.getMessage() + "), using other copies");
+            }
+        }
+        throw new IOException("No available copy of chunk " + placement.hash()
+                + (lastError == null ? " (no node holding it is up)" : ""), lastError);
     }
 
     /**
@@ -122,77 +144,5 @@ public class DownloadOrchestratorClient {
             throw new IllegalArgumentException("Refusing unsafe file name from server: " + name);
         }
         return name;
-    }
-
-    /**
-     * Fetches file metadata and Node download location from the Coordinator.
-     */
-    private FilesGetResponse getFileInfo(String fileId) {
-        try (Socket socket = new Socket(config.coordinatorHost(), config.coordinatorPort())) {
-
-            TcpMessageReader reader = new TcpMessageReader(socket.getInputStream());
-            TcpMessageWriter writer = new TcpMessageWriter(socket.getOutputStream());
-
-            // Read WELCOME message from Coordinator
-            reader.read();
-
-            FilesGetRequest req = new FilesGetRequest();
-            req.setFileId(fileId);
-
-            writer.send(new Message("FILES_GET_REQUEST", gson.toJson(req)), null);
-
-            ReceivedMessage resp = reader.read();
-            if (resp == null || resp.getHeader() == null) {
-                throw new RuntimeException("Coordinator closed the connection unexpectedly");
-            }
-
-            Message header = resp.getHeader();
-
-            if (!"FILES_GET_RESPONSE".equals(header.getType())) {
-                throw new RuntimeException("Coordinator error: " + header.getType() + " " + header.getData());
-            }
-
-            return gson.fromJson(header.getData(), FilesGetResponse.class);
-
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to fetch file info", e);
-        }
-    }
-
-    /**
-     * Downloads a single chunk by trying each available source in order, reusing one open
-     * session per source. A source that fails is skipped for the rest of this download.
-     */
-    private byte[] downloadChunkFromAnySource(
-            List<FilesGetResponse.NodeEndpoint> sources,
-            Map<FilesGetResponse.NodeEndpoint, NodeSession> sessions,
-            Set<FilesGetResponse.NodeEndpoint> failed,
-            String fileId,
-            int chunkIndex
-    ) {
-        Exception lastError = null;
-
-        for (FilesGetResponse.NodeEndpoint source : sources) {
-            if (failed.contains(source)) {
-                continue;
-            }
-            try {
-                NodeSession session = sessions.get(source);
-                if (session == null) {
-                    session = NodeSession.open(source.getHost(), source.getPort());
-                    sessions.put(source, session);
-                }
-                return session.downloadChunk(fileId, chunkIndex);
-            } catch (IOException e) {
-                lastError = e;
-                failed.add(source);
-                NodeSession broken = sessions.remove(source);
-                if (broken != null) broken.close();
-                System.err.println("Chunk " + chunkIndex + " failed from " + source + " (" + e.getMessage()
-                        + "), trying next source...");
-            }
-        }
-
-        throw new RuntimeException("Failed to download chunk " + chunkIndex + " from all sources", lastError);
     }
 }

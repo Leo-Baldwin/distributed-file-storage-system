@@ -55,6 +55,18 @@ public class NodeInfo {
     }
 
     /**
+     * Recreates a node remembered from a previous Coordinator run. It starts DOWN and only
+     * becomes UP when the node itself registers again.
+     */
+    public static NodeInfo restored(String nodeId, String host, int port, long capacityBytes,
+                                    String failureDomain, long freeBytes, long lastSeenEpochMs) {
+        NodeInfo node = new NodeInfo(nodeId, host, port, capacityBytes, failureDomain, lastSeenEpochMs);
+        node.freeBytes = freeBytes;
+        node.status = Status.DOWN;
+        return node;
+    }
+
+    /**
      * @return unique identifier of the node
      */
     public String getNodeId() {

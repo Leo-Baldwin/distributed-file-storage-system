@@ -1,17 +1,14 @@
 package com.leo.dfss.client;
 
-import com.google.gson.Gson;
+import com.leo.dfss.common.ChunkHashes;
 import com.leo.dfss.config.ClientConfig;
 import com.leo.dfss.protocol.*;
-import com.leo.dfss.transport.ReceivedMessage;
-import com.leo.dfss.transport.TcpMessageReader;
-import com.leo.dfss.transport.TcpMessageWriter;
 
-import java.net.Socket;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Arrays;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -21,16 +18,19 @@ import java.util.concurrent.Future;
 /**
  * Client-side upload orchestrator.
  *
- * Responsibilities:
- * - Reads a local file and splits it into fixed-size chunks.
- * - Contacts the Coordinator to initialise the upload and obtain the target Node location.
- * - Uploads each chunk to the Node using CHUNK_UPLOAD (header + binary body).
- * - Commits the upload with the Coordinator so the file becomes downloadable.
+ * 1. FILES_INIT_REQUEST: the Coordinator creates a file record and picks target nodes,
+ *    one per failure domain.
+ * 2. The file is split into fixed-size chunks; each is hashed (SHA-256) and written to every
+ *    target in parallel. Nodes verify the hash and store each distinct chunk only once.
+ * 3. FILES_COMMIT with the ordered chunk hashes: the Coordinator checks every chunk is held by a
+ *    node, then marks the file COMPLETE.
  *
+ * Progress goes to stderr; {@link #main} prints only the file ID to stdout.
  */
 public class UploadOrchestratorClient {
 
-    private static final Gson gson = new Gson();
+    // Nodes report new chunks to the Coordinator within ~100 ms, so a commit can briefly race them
+    private static final long COMMIT_RETRY_TIMEOUT_MS = 15_000;
 
     private final ClientConfig config;
 
@@ -48,133 +48,66 @@ public class UploadOrchestratorClient {
             System.err.println("Usage: UploadOrchestratorClient <filePath>");
             return;
         }
-
-        Path filePath = Path.of(args[0]);
-        String fileId = new UploadOrchestratorClient().uploadFile(filePath);
-        System.out.println(fileId);
+        System.out.println(new UploadOrchestratorClient().uploadFile(Path.of(args[0])));
     }
 
     /**
      * Performs a full upload workflow for the given file.
      *
-     * @param filePath path to the local file to upload
+     * @return the new file's ID
      */
     public String uploadFile(Path filePath) {
         long fileSize;
         String fileName;
-
         try {
             fileSize = Files.size(filePath);
             fileName = filePath.getFileName().toString();
-        } catch (Exception e) {
+        } catch (IOException e) {
             throw new RuntimeException("Failed to read file metadata", e);
         }
 
-        System.err.println("Uploading file: " + fileName + " (" + fileSize + " bytes)");
-
-        int chunkSizeBytes = config.chunkSizeBytes();
-
-        FilesInitResponse init = initUploadWithCoordinator(fileName, fileSize, chunkSizeBytes);
-        String fileId = init.getFileId();
-
-        System.err.println("fileId " + fileId + ": " + init.getTotalChunks() + " chunk(s) of "
-                + init.getChunkSizeBytes() + " bytes");
-
-        uploadChunksToNodes(filePath, init);
-
-        FilesCommitAck commitAck = commitUploadWithCoordinator(fileId);
-
-        System.err.println("\n--- Commit result ---");
-        System.err.println("status  = " + commitAck.getStatus());
-        System.err.println("message = " + commitAck.getMessage());
-
-        if (!"OK".equalsIgnoreCase(commitAck.getStatus())) {
-            throw new RuntimeException("Commit failed: " + commitAck.getMessage());
+        FilesInitResponse init;
+        try (CoordinatorClient coordinator = CoordinatorClient.connect(config)) {
+            init = coordinator.request("FILES_INIT_REQUEST",
+                    new FilesInitRequest(fileName, fileSize, config.chunkSizeBytes()), null,
+                    "FILES_INIT_RESPONSE", FilesInitResponse.class);
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to start upload with Coordinator: " + e.getMessage(), e);
         }
-        return fileId;
+
+        System.err.println("Uploading " + fileName + " (" + fileSize + " bytes, " + init.totalChunks()
+                + " chunk(s)) to " + init.uploadTargets());
+        if (init.warning() != null) {
+            System.err.println("WARNING: " + init.warning());
+        }
+
+        List<String> hashes = uploadChunks(filePath, init);
+        commit(init.fileId(), hashes);
+        return init.fileId();
     }
 
     /**
-     * Sends FILES_INIT_REQUEST to the Coordinator to create a new file record and obtain
-     * the Node upload destination.
-     */
-    private FilesInitResponse initUploadWithCoordinator(
-            String fileName,
-            long fileSize,
-            int chunkSizeBytes
-    ) {
-        try (Socket socket = new Socket(config.coordinatorHost(), config.coordinatorPort())) {
-            TcpMessageReader reader = new TcpMessageReader(socket.getInputStream());
-            TcpMessageWriter writer = new TcpMessageWriter(socket.getOutputStream());
-
-            // Read welcome message from coordinator server
-            ReceivedMessage welcome = reader.read();
-            if (welcome != null && welcome.getHeader() != null) {
-                System.err.println("Coordinator -> " + welcome.getHeader().getType() + " " + welcome.getHeader().getData());
-            }
-
-            // Build typed request
-            FilesInitRequest request = new FilesInitRequest();
-            request.setFilename(fileName);
-            request.setTotalSizeBytes(fileSize);
-            request.setChunkSizeBytes(chunkSizeBytes);
-            request.setBodyLength(0);
-
-            // Send request
-            writer.send(new Message("FILES_INIT_REQUEST", gson.toJson(request)), null);
-
-            // Read response from server
-            ReceivedMessage resp = reader.read();
-            if (resp == null || resp.getHeader() == null) {
-                throw new RuntimeException("Failed to read response from coordinator.");
-            }
-
-            Message header = resp.getHeader();
-            String type = header.getType();
-            String data = header.getData();
-
-            if ("FILES_INIT_RESPONSE".equals(type)) {
-                return gson.fromJson(data, FilesInitResponse.class);
-            }
-
-            // If response not read and returned then throw error
-            throw new RuntimeException("Unrecognized response returned. " + type + ": " + data);
-
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to initiate upload with Coordinator. ", e);
-        }
-    }
-
-    /**
-     * Uploads all chunks of the file to the Node targets provided by the Coordinator.
+     * Uploads every chunk to all targets, in parallel across targets, over one connection each.
+     * Strict acknowledgement: every target must ACK a chunk before moving on.
      *
-     * Replication behaviour:
-     * - Each chunk is uploaded to ALL targets, in parallel, over one reused connection per target.
-     * - Strict acknowledgement policy: every target must ACK OK before moving to the next chunk.
-     * - For backward compatibility, if no targets are provided, the legacy uploadHost/uploadPort is used.
+     * @return the file's chunk hashes, in order
      */
-    private void uploadChunksToNodes(Path filePath, FilesInitResponse init) {
-        int chunkSizeBytes = init.getChunkSizeBytes();
-        String fileId = init.getFileId();
-
-        // Determine where to upload chunks. Prefer replication targets, fall back to legacy host/port.
-        List<FilesInitResponse.NodeEndpoint> targets = new ArrayList<>();
-        if (init.getUploadTargets() != null && !init.getUploadTargets().isEmpty()) {
-            targets.addAll(init.getUploadTargets());
-        } else {
-            targets.add(new FilesInitResponse.NodeEndpoint("primary", init.getUploadHost(), init.getUploadPort()));
+    private List<String> uploadChunks(Path filePath, FilesInitResponse init) {
+        List<NodeEndpoint> targets = init.uploadTargets();
+        if (targets == null || targets.isEmpty()) {
+            throw new IllegalStateException("Coordinator returned no upload targets");
         }
-        System.err.println("Uploading to " + targets.size() + " node(s): " + targets);
 
+        int chunkSizeBytes = init.chunkSizeBytes();
+        List<String> hashes = new ArrayList<>(init.totalChunks());
         List<NodeSession> sessions = new ArrayList<>();
         ExecutorService pool = Executors.newFixedThreadPool(targets.size());
         try (var in = Files.newInputStream(filePath)) {
-            for (FilesInitResponse.NodeEndpoint target : targets) {
-                sessions.add(NodeSession.open(target.getHost(), target.getPort()));
+            for (NodeEndpoint target : targets) {
+                sessions.add(NodeSession.open(target.host(), target.port()));
             }
 
             byte[] buffer = new byte[chunkSizeBytes];
-            int chunkIndex = 0;
             while (true) {
                 // readNBytes fills the whole buffer unless EOF is reached, so chunk boundaries
                 // always match the Coordinator's plan (a plain read() may return short reads)
@@ -183,83 +116,67 @@ public class UploadOrchestratorClient {
                     break; // EOF
                 }
 
-                byte[] chunkBytes = Arrays.copyOf(buffer, bytesRead);
-                final int index = chunkIndex;
+                byte[] chunk = Arrays.copyOf(buffer, bytesRead);
+                String hash = ChunkHashes.sha256Hex(chunk);
 
                 List<Future<?>> writes = new ArrayList<>();
                 for (NodeSession session : sessions) {
                     writes.add(pool.submit(() -> {
-                        session.uploadChunk(fileId, index, chunkBytes);
+                        session.uploadChunk(hash, chunk);
                         return null;
                     }));
                 }
                 for (Future<?> write : writes) {
                     write.get();
                 }
-
-                chunkIndex++;
+                hashes.add(hash);
             }
 
-            if (chunkIndex != init.getTotalChunks()) {
-                throw new IllegalStateException("File changed during upload: read " + chunkIndex
-                        + " chunks, expected " + init.getTotalChunks());
+            if (hashes.size() != init.totalChunks()) {
+                throw new IllegalStateException("File changed during upload: read " + hashes.size()
+                        + " chunks, expected " + init.totalChunks());
             }
 
         } catch (ExecutionException e) {
-            throw new RuntimeException("Failed during chunk uploads", e.getCause());
+            throw new RuntimeException("Failed during chunk uploads: " + e.getCause().getMessage(), e.getCause());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new RuntimeException("Upload interrupted", e);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed during chunk uploads", e);
+        } catch (IOException e) {
+            throw new RuntimeException("Failed during chunk uploads: " + e.getMessage(), e);
         } finally {
             pool.shutdownNow();
             sessions.forEach(NodeSession::close);
         }
-
-        System.err.println("All " + init.getTotalChunks() + " chunk(s) uploaded.");
+        return hashes;
     }
 
     /**
-     * Sends FILES_COMMIT to the Coordinator to mark the file COMPLETE.
+     * Commits the file. Retries while the Coordinator reports MISSING_CHUNKS, which only means the
+     * nodes haven't finished reporting chunks they just stored.
      */
-    private FilesCommitAck commitUploadWithCoordinator(String fileId) {
-        try (Socket socket = new Socket(config.coordinatorHost(), config.coordinatorPort())) {
-            TcpMessageReader reader = new TcpMessageReader(socket.getInputStream());
-            TcpMessageWriter writer = new TcpMessageWriter(socket.getOutputStream());
-
-            // Read welcome message from CoordinatorServer
-            ReceivedMessage welcome = reader.read();
-            if (welcome != null && welcome.getHeader() != null) {
-                System.err.println("Coordinator -> " + welcome.getHeader().getType() + " " + welcome.getHeader().getData());
+    private void commit(String fileId, List<String> hashes) {
+        long deadline = System.currentTimeMillis() + COMMIT_RETRY_TIMEOUT_MS;
+        long backoffMs = 50;
+        try (CoordinatorClient coordinator = CoordinatorClient.connect(config)) {
+            while (true) {
+                FilesCommitAck ack = coordinator.request("FILES_COMMIT", new FilesCommitRequest(fileId),
+                        ChunkHashes.pack(hashes), "FILES_COMMIT_ACK", FilesCommitAck.class);
+                if ("OK".equals(ack.status())) {
+                    System.err.println("Committed " + fileId);
+                    return;
+                }
+                if (!"MISSING_CHUNKS".equals(ack.status()) || System.currentTimeMillis() > deadline) {
+                    throw new RuntimeException("Commit failed: " + ack.message());
+                }
+                Thread.sleep(backoffMs);
+                backoffMs = Math.min(backoffMs * 2, 1_000);
             }
-
-            // Build commit request
-            FilesCommitRequest req = new FilesCommitRequest();
-            req.setFileId(fileId);
-            req.setBodyLength(0);
-
-            // Send FILES_COMMIT
-            writer.send(new Message("FILES_COMMIT", gson.toJson(req)), null);
-
-            // Read response
-            ReceivedMessage resp = reader.read();
-            if (resp == null || resp.getHeader() == null) {
-                throw new RuntimeException("File commit failed");
-            }
-
-            Message header = resp.getHeader();
-            String type = header.getType();
-            String data = header.getData();
-
-            if ("FILES_COMMIT_ACK".equals(type)) {
-                return gson.fromJson(data, FilesCommitAck.class);
-            }
-
-            throw new RuntimeException("Coordinator returned " + type + ": " + data);
-
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to commit upload with Coordinator. ", e);
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to commit upload with Coordinator: " + e.getMessage(), e);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Commit interrupted", e);
         }
     }
 }
