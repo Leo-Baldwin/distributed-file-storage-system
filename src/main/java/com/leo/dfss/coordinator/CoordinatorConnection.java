@@ -138,8 +138,15 @@ public class CoordinatorConnection extends Thread {
             return;
         }
 
-        if (request.getFilename() == null || request.getFilename().isBlank()) {
+        String filename = request.getFilename();
+        if (filename == null || filename.isBlank()) {
             writer.send(new Message("ERROR", "Missing file name."), null);
+            return;
+        }
+        // A plain name only: it is later used as a path by downloading clients
+        if (filename.equals(".") || filename.equals("..") || filename.contains("/")
+                || filename.contains("\\") || filename.indexOf('\0') >= 0) {
+            writer.send(new Message("ERROR", "File name must not contain path separators."), null);
             return;
         }
 

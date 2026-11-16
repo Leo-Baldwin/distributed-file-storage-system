@@ -13,6 +13,10 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 /**
  * Client-side upload orchestrator.
@@ -73,19 +77,10 @@ public class UploadOrchestratorClient {
         FilesInitResponse init = initUploadWithCoordinator(fileName, fileSize, chunkSizeBytes);
         String fileId = init.getFileId();
 
-        System.out.println("\n--- Coordinator upload plan ---");
-        System.out.println("fileId      = " + init.getFileId());
-        System.out.println("totalChunks = " + init.getTotalChunks());
-        System.out.println("chunkSize   = " + init.getChunkSizeBytes());
-        System.out.println("uploadHost  = " + init.getUploadHost());
-        System.out.println("uploadPort  = " + init.getUploadPort());
-        if (init.getUploadTargets() != null && !init.getUploadTargets().isEmpty()) {
-            System.out.println("uploadTargets = " + init.getUploadTargets());
-        }
+        System.out.println("fileId " + fileId + ": " + init.getTotalChunks() + " chunk(s) of "
+                + init.getChunkSizeBytes() + " bytes");
 
-        debugChunkFile(filePath, init.getChunkSizeBytes(), init.getTotalChunks());
-
-        uploadChunksToNode(filePath, init);
+        uploadChunksToNodes(filePath, init);
 
         FilesCommitAck commitAck = commitUploadWithCoordinator(fileId);
 
@@ -151,60 +146,14 @@ public class UploadOrchestratorClient {
     }
 
     /**
-     * Debug helper that chunks the file locally and prints the number/size of chunks.
-     * This is useful to verify the local chunking logic matches the Coordinator plan.
-     */
-    private void debugChunkFile(Path filePath, int chunkSizeBytes, int expectedTotalChunks) {
-        System.out.println("\n--- Local chunking (debug) ---");
-        System.out.println("chunkSizeBytes = " + chunkSizeBytes);
-        System.out.println("expectedChunks = " + expectedTotalChunks);
-
-        int chunkIndex = 0;
-
-        try (var in = Files.newInputStream(filePath)) {
-            byte[] buffer = new byte[chunkSizeBytes];
-
-            while (true) {
-                int bytesRead = in.read(buffer);
-                if (bytesRead == -1) {
-                    break; // EOF
-                }
-
-                // Copy only the bytes actually read (important for last chunk)
-                byte[] chunkBytes = java.util.Arrays.copyOf(buffer, bytesRead);
-
-                System.out.println("chunk[" + chunkIndex + "] bytesRead=" + chunkBytes.length);
-
-                chunkIndex++;
-            }
-
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to chunk file locally", e);
-        }
-
-        System.out.println("chunksRead = " + chunkIndex);
-
-        if (chunkIndex != expectedTotalChunks) {
-            System.out.println("WARNING: chunksRead != expectedTotalChunks");
-        } else {
-            System.out.println("OK: local chunking matches coordinator plan");
-        }
-    }
-
-    /**
      * Uploads all chunks of the file to the Node targets provided by the Coordinator.
      *
      * Replication behaviour:
-     * - If the Coordinator provides multiple upload targets, each chunk is uploaded to ALL targets.
-     * - Upload uses a strict acknowledgement policy: the client requires an OK ACK from every target.
+     * - Each chunk is uploaded to ALL targets, in parallel, over one reused connection per target.
+     * - Strict acknowledgement policy: every target must ACK OK before moving to the next chunk.
      * - For backward compatibility, if no targets are provided, the legacy uploadHost/uploadPort is used.
      */
-    private void uploadChunksToNode(
-            Path filePath,
-            FilesInitResponse init
-    ) {
-        System.out.println("\n--- Uploading chunks to node ---");
-
+    private void uploadChunksToNodes(Path filePath, FilesInitResponse init) {
         int chunkSizeBytes = init.getChunkSizeBytes();
         String fileId = init.getFileId();
 
@@ -213,82 +162,62 @@ public class UploadOrchestratorClient {
         if (init.getUploadTargets() != null && !init.getUploadTargets().isEmpty()) {
             targets.addAll(init.getUploadTargets());
         } else {
-            // Legacy single-target response
             targets.add(new FilesInitResponse.NodeEndpoint("primary", init.getUploadHost(), init.getUploadPort()));
         }
+        System.out.println("Uploading to " + targets.size() + " node(s): " + targets);
 
-        System.out.println("Replication targets (upload) = " + targets);
-
-        int chunkIndex = 0;
-
-        // Stream the file and upload each chunk sequentially
+        List<NodeSession> sessions = new ArrayList<>();
+        ExecutorService pool = Executors.newFixedThreadPool(targets.size());
         try (var in = Files.newInputStream(filePath)) {
-            byte[] buffer = new byte[chunkSizeBytes];
+            for (FilesInitResponse.NodeEndpoint target : targets) {
+                sessions.add(NodeSession.open(target.getHost(), target.getPort()));
+            }
 
+            byte[] buffer = new byte[chunkSizeBytes];
+            int chunkIndex = 0;
             while (true) {
-                int bytesRead = in.read(buffer);
-                if (bytesRead == -1) {
+                // readNBytes fills the whole buffer unless EOF is reached, so chunk boundaries
+                // always match the Coordinator's plan (a plain read() may return short reads)
+                int bytesRead = in.readNBytes(buffer, 0, chunkSizeBytes);
+                if (bytesRead == 0) {
                     break; // EOF
                 }
 
                 byte[] chunkBytes = Arrays.copyOf(buffer, bytesRead);
+                final int index = chunkIndex;
 
-                // Build CHUNK_UPLOAD request header (declares bodyLength)
-                ChunkUploadRequest req = new ChunkUploadRequest();
-                req.setFileId(fileId);
-                req.setChunkIndex(chunkIndex);
-                req.setBodyLength(chunkBytes.length);
-
-                // Upload this chunk to ALL targets (strict ACK: every target must ACK OK)
-                for (FilesInitResponse.NodeEndpoint target : targets) {
-
-                    // Connect to the Node for this chunk upload
-                    try (Socket socket = new Socket(target.getHost(), target.getPort())) {
-                        TcpMessageReader reader = new TcpMessageReader(socket.getInputStream());
-                        TcpMessageWriter writer = new TcpMessageWriter(socket.getOutputStream());
-
-                        // Read welcome message from node server
-                        ReceivedMessage welcome = reader.read();
-                        if (welcome != null && welcome.getHeader() != null) {
-                            System.out.println("Node(" + target.getHost() + ":" + target.getPort() + ") -> " + welcome.getHeader().getType());
-                        }
-
-                        // Send CHUNK_UPLOAD (header + body)
-                        writer.send(
-                                new Message("CHUNK_UPLOAD", gson.toJson(req)),
-                                chunkBytes
-                        );
-
-                        // Read CHUNK_UPLOAD_ACK
-                        ReceivedMessage resp = reader.read();
-                        if (resp == null || resp.getHeader() == null) {
-                            throw new RuntimeException("Node closed connection without ACK (" + target + ")");
-                        }
-
-                        Message header = resp.getHeader();
-                        if (!"CHUNK_UPLOAD_ACK".equals(header.getType())) {
-                            throw new RuntimeException("Unexpected response from node (" + target + "): " +
-                                    header.getType() + " " + header.getData());
-                        }
-
-                        ChunkUploadAck ack = gson.fromJson(header.getData(), ChunkUploadAck.class);
-                        if (!"OK".equalsIgnoreCase(ack.getStatus())) {
-                            throw new RuntimeException("Chunk upload failed on (" + target + "): " + ack.getMessage());
-                        }
-                    }
+                List<Future<?>> writes = new ArrayList<>();
+                for (NodeSession session : sessions) {
+                    writes.add(pool.submit(() -> {
+                        session.uploadChunk(fileId, index, chunkBytes);
+                        return null;
+                    }));
                 }
-
-                System.out.println("Uploaded chunk " + chunkIndex +
-                        " (" + bytesRead + " bytes) to " + targets.size() + " target(s)");
+                for (Future<?> write : writes) {
+                    write.get();
+                }
 
                 chunkIndex++;
             }
 
+            if (chunkIndex != init.getTotalChunks()) {
+                throw new IllegalStateException("File changed during upload: read " + chunkIndex
+                        + " chunks, expected " + init.getTotalChunks());
+            }
+
+        } catch (ExecutionException e) {
+            throw new RuntimeException("Failed during chunk uploads", e.getCause());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Upload interrupted", e);
         } catch (Exception e) {
             throw new RuntimeException("Failed during chunk uploads", e);
+        } finally {
+            pool.shutdownNow();
+            sessions.forEach(NodeSession::close);
         }
 
-        System.out.println("All chunks uploaded successfully.");
+        System.out.println("All " + init.getTotalChunks() + " chunk(s) uploaded.");
     }
 
     /**
