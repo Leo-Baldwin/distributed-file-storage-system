@@ -21,8 +21,9 @@ class PlacementTest {
     }
 
     private static void node(CoordinatorServer c, String id, String domain, long freeBytes) {
-        assertTrue(c.registerNode(id, "127.0.0.1", 9101, 1_000_000, domain));
-        c.handleHeartbeat(id, System.currentTimeMillis(), freeBytes);
+        String session = c.registerNode(id, "127.0.0.1", 9101, 1_000_000, domain);
+        assertNotNull(session);
+        assertTrue(c.handleHeartbeat(id, session, System.currentTimeMillis(), freeBytes));
     }
 
     @Test

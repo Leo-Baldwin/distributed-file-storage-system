@@ -46,43 +46,50 @@ public final class MetadataStore implements AutoCloseable {
             }
             Connection db = DriverManager.getConnection("jdbc:sqlite:" + dbFile.toAbsolutePath());
             try (Statement st = db.createStatement()) {
-                st.execute("PRAGMA journal_mode=WAL");     // crash-safe, readers don't block the writer
-                st.execute("PRAGMA synchronous=FULL");      // a committed file survives power loss
-                st.execute("PRAGMA foreign_keys=ON");
-                st.execute("""
-                        CREATE TABLE IF NOT EXISTS nodes (
-                            node_id        TEXT PRIMARY KEY,
-                            host           TEXT NOT NULL,
-                            port           INTEGER NOT NULL,
-                            failure_domain TEXT NOT NULL,
-                            capacity_bytes INTEGER NOT NULL,
-                            free_bytes     INTEGER NOT NULL,
-                            last_seen_ms   INTEGER NOT NULL
-                        )""");
-                st.execute("""
-                        CREATE TABLE IF NOT EXISTS files (
-                            file_id      TEXT PRIMARY KEY,
-                            name         TEXT NOT NULL,
-                            size_bytes   INTEGER NOT NULL,
-                            chunk_size   INTEGER NOT NULL,
-                            status       TEXT NOT NULL,
-                            created_ms   INTEGER NOT NULL,
-                            committed_ms INTEGER
-                        )""");
-                st.execute("""
-                        CREATE TABLE IF NOT EXISTS file_chunks (
-                            file_id     TEXT NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
-                            chunk_index INTEGER NOT NULL,
-                            hash        TEXT NOT NULL,
-                            PRIMARY KEY (file_id, chunk_index)
-                        )""");
-                // Lets later phases (repair, garbage collection) find every file using a chunk
-                st.execute("CREATE INDEX IF NOT EXISTS file_chunks_by_hash ON file_chunks(hash)");
+                createSchema(st);
+            } catch (SQLException | RuntimeException e) {
+                db.close(); // don't leak the connection if setup fails
+                throw e;
             }
             return new MetadataStore(db);
         } catch (Exception e) {
             throw new IllegalStateException("Cannot open metadata database " + dbFile, e);
         }
+    }
+
+    private static void createSchema(Statement st) throws SQLException {
+        st.execute("PRAGMA journal_mode=WAL");     // crash-safe, readers don't block the writer
+        st.execute("PRAGMA synchronous=FULL");      // a committed file survives power loss
+        st.execute("PRAGMA foreign_keys=ON");
+        st.execute("""
+                CREATE TABLE IF NOT EXISTS nodes (
+                    node_id        TEXT PRIMARY KEY,
+                    host           TEXT NOT NULL,
+                    port           INTEGER NOT NULL,
+                    failure_domain TEXT NOT NULL,
+                    capacity_bytes INTEGER NOT NULL,
+                    free_bytes     INTEGER NOT NULL,
+                    last_seen_ms   INTEGER NOT NULL
+                )""");
+        st.execute("""
+                CREATE TABLE IF NOT EXISTS files (
+                    file_id      TEXT PRIMARY KEY,
+                    name         TEXT NOT NULL,
+                    size_bytes   INTEGER NOT NULL,
+                    chunk_size   INTEGER NOT NULL,
+                    status       TEXT NOT NULL,
+                    created_ms   INTEGER NOT NULL,
+                    committed_ms INTEGER
+                )""");
+        st.execute("""
+                CREATE TABLE IF NOT EXISTS file_chunks (
+                    file_id     TEXT NOT NULL REFERENCES files(file_id) ON DELETE CASCADE,
+                    chunk_index INTEGER NOT NULL,
+                    hash        TEXT NOT NULL,
+                    PRIMARY KEY (file_id, chunk_index)
+                )""");
+        // Lets later phases (repair, garbage collection) find every file using a chunk
+        st.execute("CREATE INDEX IF NOT EXISTS file_chunks_by_hash ON file_chunks(hash)");
     }
 
     // ---------------------------------------------------------------- nodes

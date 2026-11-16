@@ -32,8 +32,18 @@ import java.util.concurrent.*;
  */
 public class CoordinatorServer {
 
-    /** Upper bound on chunks per file, so a file's chunk list fits in one message body. */
-    public static final long MAX_CHUNKS_PER_FILE = 400_000;
+    /**
+     * Upper bound on chunks per file (1.2 TB at the default 4 MiB chunk size), so a file's chunk
+     * list always fits in one message body: FILES_GET_RESPONSE needs at most
+     * 33 + 2 x {@link #MAX_HOLDERS_LISTED} bytes per chunk, i.e. 13.5 MB of the 16 MiB limit.
+     */
+    public static final long MAX_CHUNKS_PER_FILE = 300_000;
+
+    /**
+     * Most holders listed per chunk in FILES_GET_RESPONSE. A chunk can end up on many nodes over
+     * time (dedup across uploads, later repair); a client only needs a few to fail over between.
+     */
+    public static final int MAX_HOLDERS_LISTED = 6;
 
     private final CoordinatorConfig config;
     private final MetadataStore store;
@@ -321,34 +331,50 @@ public class CoordinatorServer {
      * restart) replaces its record, marks it UP and forgets its chunk list, which the node then
      * re-sends in full.
      *
-     * @return true if node registered with CoordinatorServer successfully
+     * Each registration gets a new session ID that heartbeats and chunk reports must echo. If a
+     * second process registers with the same nodeId, the first one's next heartbeat is rejected,
+     * so it re-registers and re-sends its inventory instead of silently becoming invisible.
+     *
+     * @return the new session ID, or null if the fields are invalid
      */
-    public boolean registerNode(String nodeId, String host, int port, long capacityBytes, String failureDomain) {
+    public synchronized String registerNode(String nodeId, String host, int port, long capacityBytes,
+                                            String failureDomain) {
         long now = System.currentTimeMillis();
 
-        if (nodeId == null || nodeId.isBlank()) return false;
-        if (host == null || host.isBlank()) return false;
-        if (port <= 0) return false;
+        if (nodeId == null || nodeId.isBlank()) return null;
+        if (host == null || host.isBlank()) return null;
+        if (port <= 0) return null;
+
+        NodeInfo previous = nodes.get(nodeId);
+        if (previous != null && previous.getStatus() == NodeInfo.Status.UP
+                && now - previous.getLastSeenEpochMs() < config.heartbeatTimeoutMs()
+                && (!previous.getHost().equals(host) || previous.getPort() != port)) {
+            System.out.println("WARNING: node " + nodeId + " registered from " + host + ":" + port
+                    + " while still live at " + previous.getHost() + ":" + previous.getPort()
+                    + " (duplicate node ID? copied data directory?)");
+        }
 
         String domain = (failureDomain == null || failureDomain.isBlank()) ? nodeId : failureDomain;
-        NodeInfo node = new NodeInfo(nodeId, host, port, capacityBytes, domain, now);
+        String sessionId = UUID.randomUUID().toString();
+        NodeInfo node = new NodeInfo(nodeId, host, port, capacityBytes, domain, sessionId, now);
         locations.clearNode(nodeId);
         nodes.put(nodeId, node);
         persist(node);
 
         System.out.println("Node " + node.getNodeId() + " registered at " + host + ":" + port
                 + " (domain " + domain + ")");
-        return true;
+        return sessionId;
     }
 
     /**
      * Handles NODE_HEARTBEAT.
      *
-     * @return true if the node is known, else false (the node will then re-register)
+     * @return true if the node is known and the session is current, else false (the node will
+     * then re-register)
      */
-    public boolean handleHeartbeat(String nodeId, long timeStampEpochMs, long freeBytes) {
+    public boolean handleHeartbeat(String nodeId, String sessionId, long timeStampEpochMs, long freeBytes) {
         NodeInfo node = nodes.get(nodeId);
-        if (node == null) {
+        if (node == null || !node.isSession(sessionId)) {
             return false;
         }
         node.updateHeartbeat(timeStampEpochMs, freeBytes);
@@ -359,10 +385,11 @@ public class CoordinatorServer {
     /**
      * Handles NODE_CHUNKS_ADDED: the node now holds these chunks.
      *
-     * @return false if the node is unknown (it must register first)
+     * @return false if the node is unknown or the session is stale (it must register again)
      */
-    public boolean chunksAdded(String nodeId, List<String> hashes) {
-        if (!nodes.containsKey(nodeId)) {
+    public boolean chunksAdded(String nodeId, String sessionId, List<String> hashes) {
+        NodeInfo node = nodes.get(nodeId);
+        if (node == null || !node.isSession(sessionId)) {
             return false;
         }
         locations.add(nodeId, hashes);

@@ -7,7 +7,8 @@ public class NodeRegisterAck {
 
     private String type = "NODE_REGISTER_ACK";
     private String status;   // "OK" or "ERROR"
-    private String message;  // optional detail
+    private String message;
+    private String sessionId; // identifies this registration; heartbeats and chunk reports must echo it  // optional detail
     private int bodyLength = 0;
 
     public NodeRegisterAck() {}
@@ -42,5 +43,13 @@ public class NodeRegisterAck {
 
     public void setBodyLength(int bodyLength) {
         this.bodyLength = bodyLength;
+    }
+
+    public String getSessionId() {
+        return sessionId;
+    }
+
+    public void setSessionId(String sessionId) {
+        this.sessionId = sessionId;
     }
 }

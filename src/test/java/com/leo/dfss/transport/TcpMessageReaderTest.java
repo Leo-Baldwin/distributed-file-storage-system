@@ -27,6 +27,13 @@ class TcpMessageReaderTest {
     }
 
     @Test
+    void writer_refusesBodiesTheReaderWouldReject() {
+        TcpMessageWriter writer = new TcpMessageWriter(new ByteArrayOutputStream());
+        assertThrows(IOException.class,
+                () -> writer.send(new Message("X", null), new byte[TcpMessageReader.MAX_BODY_BYTES + 1]));
+    }
+
+    @Test
     void endOfStream_returnsNull() throws Exception {
         assertNull(new TcpMessageReader(new ByteArrayInputStream(new byte[0])).read());
     }

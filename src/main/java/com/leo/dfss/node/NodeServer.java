@@ -63,6 +63,7 @@ public class NodeServer {
     private volatile Socket coordinatorSocket;
     private Thread coordinatorThread;
     private volatile boolean registered;
+    private volatile String sessionId; // from the current registration's NODE_REGISTER_ACK
 
     private volatile boolean running = true;
 
@@ -233,10 +234,12 @@ public class NodeServer {
         if (ack == null) {
             throw new IOException("Coordinator closed the connection during registration");
         }
-        if (!"NODE_REGISTER_ACK".equals(ack.getHeader().getType())
-                || !"OK".equalsIgnoreCase(gson.fromJson(ack.getHeader().getData(), NodeRegisterAck.class).getStatus())) {
+        NodeRegisterAck registerAck = "NODE_REGISTER_ACK".equals(ack.getHeader().getType())
+                ? gson.fromJson(ack.getHeader().getData(), NodeRegisterAck.class) : null;
+        if (registerAck == null || !"OK".equalsIgnoreCase(registerAck.getStatus()) || registerAck.getSessionId() == null) {
             throw new IOException("Registration rejected: " + ack.getHeader().getData());
         }
+        sessionId = registerAck.getSessionId();
         registered = true;
         System.out.println("Registered with Coordinator as " + nodeId + " (domain " + config.failureDomain() + ")");
     }
@@ -256,7 +259,7 @@ public class NodeServer {
     /** Sends one NODE_CHUNKS_ADDED batch and requires an acknowledgement. */
     private void sendChunksAdded(TcpMessageReader reader, TcpMessageWriter writer, List<String> hashes)
             throws IOException {
-        writer.send(new Message("NODE_CHUNKS_ADDED", gson.toJson(new NodeChunksAdded(nodeId))),
+        writer.send(new Message("NODE_CHUNKS_ADDED", gson.toJson(new NodeChunksAdded(nodeId, sessionId))),
                 ChunkHashes.pack(hashes));
         ReceivedMessage ack = reader.read();
         if (ack == null || !"NODE_CHUNKS_ACK".equals(ack.getHeader().getType())) {
@@ -272,6 +275,7 @@ public class NodeServer {
     private void sendHeartbeat(TcpMessageReader reader, TcpMessageWriter writer) throws IOException {
         NodeHeartbeat hb = new NodeHeartbeat();
         hb.setNodeId(nodeId);
+        hb.setSessionId(sessionId);
         hb.setTimestampEpochMs(System.currentTimeMillis());
         hb.setFreeBytes(diskSpace(false));
 

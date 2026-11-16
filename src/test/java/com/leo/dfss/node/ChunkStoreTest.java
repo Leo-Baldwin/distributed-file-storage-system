@@ -46,6 +46,21 @@ class ChunkStoreTest {
     }
 
     @Test
+    void damagedExistingCopy_isDetectedAndRewritten() throws Exception {
+        ChunkStore store = new ChunkStore(tempDir);
+        byte[] data = randomBytes(5000, 5);
+        String hash = ChunkHashes.sha256Hex(data);
+        store.put(hash, data);
+
+        // Simulate a power cut that left a truncated file under the valid name
+        Path file = tempDir.resolve("chunks").resolve(hash.substring(0, 2)).resolve(hash.substring(2, 4)).resolve(hash);
+        Files.write(file, java.util.Arrays.copyOf(data, 100));
+
+        assertTrue(store.put(hash, data), "a damaged copy must be rewritten, not treated as already stored");
+        assertArrayEquals(data, store.get(hash));
+    }
+
+    @Test
     void dataNotMatchingItsHash_isRejected() {
         ChunkStore store = new ChunkStore(tempDir);
         byte[] data = randomBytes(100, 2);

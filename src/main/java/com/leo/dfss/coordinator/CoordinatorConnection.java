@@ -202,6 +202,9 @@ public class CoordinatorConnection extends Thread {
         for (String hash : coordinator.getFileChunks(request.fileId())) {
             List<Integer> indexes = new ArrayList<>();
             for (String nodeId : locations.nodesFor(hash)) {
+                if (indexes.size() == CoordinatorServer.MAX_HOLDERS_LISTED) {
+                    break;
+                }
                 NodeInfo node = coordinator.getNodes().get(nodeId);
                 if (node == null || node.getStatus() != NodeInfo.Status.UP) {
                     continue;
@@ -243,11 +246,12 @@ public class CoordinatorConnection extends Thread {
             host = socket.getInetAddress().getHostAddress();
         }
 
-        boolean ok = coordinator.registerNode(req.getNodeId(), host, req.getPort(),
+        String sessionId = coordinator.registerNode(req.getNodeId(), host, req.getPort(),
                 req.getCapacityBytes(), req.getFailureDomain());
 
-        ack.setStatus(ok ? "OK" : "ERROR");
-        ack.setMessage(ok ? "Node registered" : "Registration failed (invalid fields)");
+        ack.setStatus(sessionId != null ? "OK" : "ERROR");
+        ack.setMessage(sessionId != null ? "Node registered" : "Registration failed (invalid fields)");
+        ack.setSessionId(sessionId);
         writer.send(new Message("NODE_REGISTER_ACK", gson.toJson(ack)), null);
     }
 
@@ -262,8 +266,8 @@ public class CoordinatorConnection extends Thread {
         }
 
         long ts = hb.getTimestampEpochMs() > 0 ? hb.getTimestampEpochMs() : System.currentTimeMillis();
-        if (!coordinator.handleHeartbeat(hb.getNodeId(), ts, hb.getFreeBytes())) {
-            writer.send(new Message("ERROR", "Unknown nodeId: " + hb.getNodeId()), null);
+        if (!coordinator.handleHeartbeat(hb.getNodeId(), hb.getSessionId(), ts, hb.getFreeBytes())) {
+            writer.send(new Message("ERROR", "Unknown node or stale session: " + hb.getNodeId()), null);
             return;
         }
 
@@ -279,8 +283,8 @@ public class CoordinatorConnection extends Thread {
     private void handleChunksAdded(Message header, byte[] body, TcpMessageWriter writer) throws IOException {
         NodeChunksAdded msg = parse(header, NodeChunksAdded.class);
         List<String> hashes = ChunkHashes.unpack(body);
-        if (!coordinator.chunksAdded(msg.nodeId(), hashes)) {
-            writer.send(new Message("ERROR", "Unknown nodeId: " + msg.nodeId()), null);
+        if (!coordinator.chunksAdded(msg.nodeId(), msg.sessionId(), hashes)) {
+            writer.send(new Message("ERROR", "Unknown node or stale session: " + msg.nodeId()), null);
             return;
         }
         writer.send(new Message("NODE_CHUNKS_ACK", String.valueOf(hashes.size())), null);

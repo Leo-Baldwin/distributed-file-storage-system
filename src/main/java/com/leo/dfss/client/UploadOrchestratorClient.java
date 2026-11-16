@@ -29,8 +29,9 @@ import java.util.concurrent.Future;
  */
 public class UploadOrchestratorClient {
 
-    // Nodes report new chunks to the Coordinator within ~100 ms, so a commit can briefly race them
-    private static final long COMMIT_RETRY_TIMEOUT_MS = 15_000;
+    // Nodes report new chunks within ~100 ms, so a commit can briefly race them. Allow longer for
+    // the case where the Coordinator restarted mid-upload and nodes are re-sending inventories.
+    private static final long COMMIT_RETRY_TIMEOUT_MS = 60_000;
 
     private final ClientConfig config;
 

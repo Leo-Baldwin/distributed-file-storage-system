@@ -18,6 +18,12 @@ class FileMetadataTest {
     }
 
     @Test
+    void totalChunks_doesNotOverflowForHugeSizes() {
+        assertEquals(Long.MAX_VALUE / 4 + 1, FileMetadata.totalChunks(Long.MAX_VALUE, 4));
+        assertThrows(IllegalArgumentException.class, () -> FileMetadata.totalChunks(-1, 4));
+    }
+
+    @Test
     void totalChunks_emptyFileHasNoChunks() {
         assertEquals(0, FileMetadata.totalChunks(0, 4));
     }

@@ -40,10 +40,12 @@ class ContentAddressingTest {
         Path copy = Files.copy(original, tempDir.resolve("b.bin"));
 
         new UploadOrchestratorClient(client).uploadFile(original);
-        long afterFirst = chunkFiles(cluster.nodes.get(0)).size();
+        java.util.Map<Path, java.nio.file.attribute.FileTime> before = modifiedTimes(cluster.nodes.get(0));
         String secondId = new UploadOrchestratorClient(client).uploadFile(copy);
 
-        assertEquals(afterFirst, chunkFiles(cluster.nodes.get(0)).size(), "no new chunks for identical content");
+        // Content-addressed paths can't create duplicate files, so counting files proves nothing;
+        // check that no stored chunk was rewritten at all
+        assertEquals(before, modifiedTimes(cluster.nodes.get(0)), "identical content must not be written again");
         Path out = new DownloadOrchestratorClient(client).downloadFile(secondId, tempDir.resolve("out"));
         assertArrayEquals(Files.readAllBytes(original), Files.readAllBytes(out));
     }
@@ -79,7 +81,33 @@ class ContentAddressingTest {
         // Nodes notice, re-register and re-send their inventories
         cluster.awaitActiveNodes(3);
 
-        Path out = downloadWhenAvailable(client, fileId, tempDir.resolve("out"));
+        // Straight away: the client waits while nodes re-send their inventories
+        Path out = new DownloadOrchestratorClient(client).downloadFile(fileId, tempDir.resolve("out"));
+        assertArrayEquals(Files.readAllBytes(input), Files.readAllBytes(out));
+    }
+
+    @Test
+    void duplicateRegistration_doesNotLeaveANodesChunksInvisible() throws Exception {
+        cluster = TestCluster.start(tempDir.resolve("cluster"), 1);
+        ClientConfig client = cluster.client().withChunkSize(64 * 1024);
+        Path input = randomFile("d.bin", 200_000, 4);
+        String fileId = new UploadOrchestratorClient(client).uploadFile(input);
+        NodeServer node = cluster.nodes.get(0);
+        int held = cluster.coordinator.getChunkLocations().chunkCount(node.getNodeId());
+        assertTrue(held > 0);
+
+        // Something else registers with the same node ID (copied data dir, stray process...):
+        // the Coordinator forgets the node's chunks and records a bogus address
+        cluster.coordinator.registerNode(node.getNodeId(), "127.0.0.1", 1, 0, "elsewhere");
+        assertEquals(0, cluster.coordinator.getChunkLocations().chunkCount(node.getNodeId()));
+
+        // The real node's next heartbeat carries a stale session, so it re-registers and
+        // re-sends its inventory
+        TestCluster.awaitTrue(() -> cluster.coordinator.getChunkLocations().chunkCount(node.getNodeId()) == held
+                        && cluster.coordinator.getNodes().get(node.getNodeId()).getPort() == node.getPort(),
+                () -> "node did not recover its registration");
+
+        Path out = new DownloadOrchestratorClient(client).downloadFile(fileId, tempDir.resolve("out"));
         assertArrayEquals(Files.readAllBytes(input), Files.readAllBytes(out));
     }
 
@@ -94,26 +122,19 @@ class ContentAddressingTest {
         assertEquals(0, Files.size(out));
     }
 
-    /**
-     * After a Coordinator restart, chunk locations are rebuilt from node reports, which takes a
-     * moment; retry until every chunk has a known holder.
-     */
-    private static Path downloadWhenAvailable(ClientConfig client, String fileId, Path outDir) throws Exception {
-        long deadline = System.currentTimeMillis() + 15_000;
-        while (true) {
-            try {
-                return new DownloadOrchestratorClient(client).downloadFile(fileId, outDir);
-            } catch (IOException e) {
-                if (System.currentTimeMillis() > deadline) throw e;
-                Thread.sleep(100);
-            }
-        }
-    }
-
     private Path randomFile(String name, int size, long seed) throws IOException {
         byte[] bytes = new byte[size];
         new Random(seed).nextBytes(bytes);
         return Files.write(tempDir.resolve(name), bytes);
+    }
+
+    private static java.util.Map<Path, java.nio.file.attribute.FileTime> modifiedTimes(NodeServer node)
+            throws IOException {
+        java.util.Map<Path, java.nio.file.attribute.FileTime> times = new java.util.HashMap<>();
+        for (Path chunk : chunkFiles(node)) {
+            times.put(chunk, Files.getLastModifiedTime(chunk));
+        }
+        return times;
     }
 
     private static void corrupt(Path chunk) throws IOException {

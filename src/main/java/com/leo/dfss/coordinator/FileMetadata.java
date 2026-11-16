@@ -29,6 +29,10 @@ public record FileMetadata(String fileId,
         if (chunkSizeBytes <= 0) {
             throw new IllegalArgumentException("chunkSizeBytes must be positive");
         }
-        return (totalSizeBytes + chunkSizeBytes - 1) / chunkSizeBytes;
+        if (totalSizeBytes < 0) {
+            throw new IllegalArgumentException("totalSizeBytes must not be negative");
+        }
+        // Written without "size + chunk - 1" so it can't overflow for sizes near Long.MAX_VALUE
+        return totalSizeBytes / chunkSizeBytes + (totalSizeBytes % chunkSizeBytes == 0 ? 0 : 1);
     }
 }

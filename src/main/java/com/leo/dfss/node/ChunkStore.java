@@ -3,11 +3,14 @@ package com.leo.dfss.node;
 import com.leo.dfss.common.ChunkHashes;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Stream;
@@ -23,7 +26,10 @@ import java.util.stream.Stream;
  *
  * Properties that follow from addressing by hash:
  * - Integrity: {@link #put} rejects bytes that don't match the hash they're stored under.
- * - Deduplication: the same bytes are only ever stored once.
+ * - Deduplication: the same bytes are only ever stored once. A damaged existing copy is
+ *   detected and rewritten rather than silently kept.
+ * - Durability: a chunk is forced to disk before {@link #put} returns, so an acknowledged chunk
+ *   survives a power cut.
  * - Safety: a valid hash is 64 hex characters, so it can't be used to escape the chunks directory.
  */
 public class ChunkStore {
@@ -54,24 +60,55 @@ public class ChunkStore {
         }
 
         Path target = pathFor(hash);
-        if (Files.exists(target)) {
-            return false; // identical content already stored
+        if (Files.exists(target) && isIntact(target, hash)) {
+            return false; // identical content already stored, and the stored copy is good
         }
+        // Either new, or the existing copy is damaged (e.g. truncated by a power cut): (re)write it
 
-        // Write to a temporary file then rename, so a crash never leaves a partial chunk under a valid name
+        // Write to a temporary file, force it to disk, rename it into place, then force the
+        // directory entry to disk. Only then is it safe to acknowledge the chunk as stored:
+        // a crash at any point leaves either no file or a complete one under the hash name.
         Files.createDirectories(target.getParent());
         Path temp = Files.createTempFile(target.getParent(), ".incoming-", ".tmp");
         try {
-            Files.write(temp, data);
+            try (FileChannel ch = FileChannel.open(temp, StandardOpenOption.WRITE)) {
+                ByteBuffer buf = ByteBuffer.wrap(data);
+                while (buf.hasRemaining()) {
+                    ch.write(buf);
+                }
+                ch.force(true);
+            }
             try {
-                Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE);
+                Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             } catch (AtomicMoveNotSupportedException e) {
                 Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
             }
+            forceDirectory(target.getParent());
         } finally {
             Files.deleteIfExists(temp);
         }
         return true;
+    }
+
+    /** @return true if the file at {@code path} hashes to {@code hash} */
+    private static boolean isIntact(Path path, String hash) {
+        try {
+            return ChunkHashes.sha256Hex(Files.readAllBytes(path)).equals(hash);
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Flushes a directory's entries to disk so a just-renamed file survives a power cut.
+     * Supported on Linux (where real nodes run); some platforms refuse to open a directory,
+     * which is ignored.
+     */
+    private static void forceDirectory(Path dir) {
+        try (FileChannel ch = FileChannel.open(dir, StandardOpenOption.READ)) {
+            ch.force(true);
+        } catch (IOException | UnsupportedOperationException ignored) {
+        }
     }
 
     /**

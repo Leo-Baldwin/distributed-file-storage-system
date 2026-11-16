@@ -28,6 +28,9 @@ import java.util.Set;
  */
 public class DownloadOrchestratorClient {
 
+    // How long to wait for nodes to report chunks before failing a download
+    private static final long HOLDER_WAIT_MS = 30_000;
+
     private final ClientConfig config;
 
     public DownloadOrchestratorClient(ClientConfig config) {
@@ -55,14 +58,31 @@ public class DownloadOrchestratorClient {
     public Path downloadFile(String fileId, Path outputDir) throws IOException {
         FilesGetResponse info;
         List<ChunkPlacements.Placement> placements;
-        try (CoordinatorClient coordinator = CoordinatorClient.connect(config)) {
-            info = coordinator.request("FILES_GET_REQUEST", new FilesGetRequest(fileId), null,
-                    "FILES_GET_RESPONSE", FilesGetResponse.class);
-            List<NodeEndpoint> nodes = info.nodes() == null ? List.of() : info.nodes();
-            placements = ChunkPlacements.decode(coordinator.lastBody(), nodes.size());
-        }
-        if (placements.size() != info.totalChunks()) {
-            throw new IOException("Coordinator listed " + placements.size() + " chunks, expected " + info.totalChunks());
+
+        // If some chunk has no known holder, nodes may still be re-sending their inventories (e.g.
+        // just after a Coordinator restart), so wait briefly and ask again before giving up
+        long deadline = System.currentTimeMillis() + HOLDER_WAIT_MS;
+        while (true) {
+            try (CoordinatorClient coordinator = CoordinatorClient.connect(config)) {
+                info = coordinator.request("FILES_GET_REQUEST", new FilesGetRequest(fileId), null,
+                        "FILES_GET_RESPONSE", FilesGetResponse.class);
+                List<NodeEndpoint> nodes = info.nodes() == null ? List.of() : info.nodes();
+                placements = ChunkPlacements.decode(coordinator.lastBody(), nodes.size());
+            }
+            if (placements.size() != info.totalChunks()) {
+                throw new IOException("Coordinator listed " + placements.size() + " chunks, expected " + info.totalChunks());
+            }
+            long unheld = placements.stream().filter(p -> p.nodeIndexes().length == 0).count();
+            if (unheld == 0 || System.currentTimeMillis() > deadline) {
+                break; // if chunks are still unheld, downloadChunk reports which one
+            }
+            System.err.println(unheld + " chunk(s) have no available copy yet; waiting for nodes...");
+            try {
+                Thread.sleep(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted while waiting for nodes", e);
+            }
         }
 
         System.err.println("Downloading " + info.filename() + " (" + info.totalSizeBytes() + " bytes, "
