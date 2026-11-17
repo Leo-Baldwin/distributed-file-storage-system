@@ -327,13 +327,9 @@ Fixed limits:
 - **No self-healing** — If a Node is lost, its copies aren't recreated elsewhere. Corruption is caught when a chunk is read, but nothing scans for it in the background yet (Phase 3).
 - **Sequential chunk downloads** — Chunks are downloaded one at a time rather than in parallel across replicas.
 
-### Planned / Future Enhancements
+### Roadmap
 
-- End-to-end encryption (AES-256) for data confidentiality in transit and at rest.
-- Persistent metadata storage (e.g., embedded database) for Coordinator durability.
-- Parallel chunk downloads across multiple replica Nodes.
-- Load-balanced or round-robin replica placement strategy.
-- Web-based client interface for file management.
+This project is being developed into a self-hosted, encrypted, decentralised backup and storage system. See [docs/ROADMAP.md](docs/ROADMAP.md) for the phases and their status.
 
 ---
 
