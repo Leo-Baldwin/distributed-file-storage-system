@@ -2,8 +2,10 @@ package com.leo.dfss.node;
 
 import com.google.gson.Gson;
 import com.leo.dfss.config.CoordinatorConfig;
+import com.leo.dfss.common.ChunkHashes;
 import com.leo.dfss.config.NodeConfig;
 import com.leo.dfss.protocol.Message;
+import com.leo.dfss.protocol.NodeChunksAdded;
 import com.leo.dfss.protocol.NodeHeartbeat;
 import com.leo.dfss.protocol.NodeRegisterAck;
 import com.leo.dfss.protocol.NodeRegisterRequest;
@@ -17,9 +19,12 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -39,10 +44,15 @@ public class NodeServer {
 
     private static final Gson gson = new Gson();
     private static final long RECONNECT_DELAY_MS = 2_000;
+    private static final long CHUNK_REPORT_DELAY_MS = 100;   // how quickly new chunks are reported
+    private static final int INVENTORY_BATCH = 100_000;       // hashes per NODE_CHUNKS_ADDED (3.2 MB)
 
     private final NodeConfig config;
     private final String nodeId; // Persistent across restarts, stored in <dataDir>/node-id
     private final ChunkStore chunkStore;
+
+    // Hashes of chunks stored since they were last reported to the Coordinator
+    private final LinkedBlockingQueue<String> unreportedChunks = new LinkedBlockingQueue<>();
 
     private final CopyOnWriteArrayList<NodeConnection> connections = new CopyOnWriteArrayList<>();
 
@@ -53,6 +63,7 @@ public class NodeServer {
     private volatile Socket coordinatorSocket;
     private Thread coordinatorThread;
     private volatile boolean registered;
+    private volatile String sessionId; // from the current registration's NODE_REGISTER_ACK
 
     private volatile boolean running = true;
 
@@ -125,7 +136,8 @@ public class NodeServer {
                 Socket client = socket.accept();
 
                 // One thread per client connection
-                NodeConnection connection = new NodeConnection(client, nextConnectionId++, chunkStore);
+                NodeConnection connection = new NodeConnection(client, nextConnectionId++, chunkStore,
+                        unreportedChunks::add);
                 connection.setDaemon(true);
                 connections.add(connection);
                 connection.start();
@@ -158,11 +170,26 @@ public class NodeServer {
                     reader.read();
 
                     register(reader, writer);
+                    sendFullInventory(reader, writer);
 
-                    // Heartbeat until the connection fails or the Coordinator stops recognising us
+                    // Heartbeat and report new chunks until the connection fails or the
+                    // Coordinator stops recognising us
+                    long nextHeartbeat = 0;
                     while (running) {
-                        sendHeartbeat(reader, writer);
-                        Thread.sleep(config.heartbeatIntervalMs());
+                        long now = System.currentTimeMillis();
+                        if (now >= nextHeartbeat) {
+                            sendHeartbeat(reader, writer);
+                            nextHeartbeat = now + config.heartbeatIntervalMs();
+                        }
+                        String first = unreportedChunks.poll(
+                                Math.min(CHUNK_REPORT_DELAY_MS, Math.max(1, nextHeartbeat - now)),
+                                TimeUnit.MILLISECONDS);
+                        if (first != null) {
+                            List<String> batch = new ArrayList<>();
+                            batch.add(first);
+                            unreportedChunks.drainTo(batch, INVENTORY_BATCH - 1);
+                            sendChunksAdded(reader, writer, batch);
+                        }
                     }
 
                 } catch (InterruptedException e) {
@@ -207,12 +234,38 @@ public class NodeServer {
         if (ack == null) {
             throw new IOException("Coordinator closed the connection during registration");
         }
-        if (!"NODE_REGISTER_ACK".equals(ack.getHeader().getType())
-                || !"OK".equalsIgnoreCase(gson.fromJson(ack.getHeader().getData(), NodeRegisterAck.class).getStatus())) {
+        NodeRegisterAck registerAck = "NODE_REGISTER_ACK".equals(ack.getHeader().getType())
+                ? gson.fromJson(ack.getHeader().getData(), NodeRegisterAck.class) : null;
+        if (registerAck == null || !"OK".equalsIgnoreCase(registerAck.getStatus()) || registerAck.getSessionId() == null) {
             throw new IOException("Registration rejected: " + ack.getHeader().getData());
         }
+        sessionId = registerAck.getSessionId();
         registered = true;
         System.out.println("Registered with Coordinator as " + nodeId + " (domain " + config.failureDomain() + ")");
+    }
+
+    /**
+     * Reports every chunk on disk. The Coordinator forgets a node's chunks when it (re)registers,
+     * so this rebuilds its view from what is actually stored here.
+     */
+    private void sendFullInventory(TcpMessageReader reader, TcpMessageWriter writer) throws IOException {
+        List<String> all = chunkStore.listHashes();
+        for (int from = 0; from < all.size(); from += INVENTORY_BATCH) {
+            sendChunksAdded(reader, writer, all.subList(from, Math.min(all.size(), from + INVENTORY_BATCH)));
+        }
+        System.out.println("Reported " + all.size() + " stored chunk(s) to the Coordinator");
+    }
+
+    /** Sends one NODE_CHUNKS_ADDED batch and requires an acknowledgement. */
+    private void sendChunksAdded(TcpMessageReader reader, TcpMessageWriter writer, List<String> hashes)
+            throws IOException {
+        writer.send(new Message("NODE_CHUNKS_ADDED", gson.toJson(new NodeChunksAdded(nodeId, sessionId))),
+                ChunkHashes.pack(hashes));
+        ReceivedMessage ack = reader.read();
+        if (ack == null || !"NODE_CHUNKS_ACK".equals(ack.getHeader().getType())) {
+            throw new IOException("Chunk report not acknowledged: " +
+                    (ack == null ? "connection closed" : ack.getHeader().getData()));
+        }
     }
 
     /**
@@ -222,6 +275,7 @@ public class NodeServer {
     private void sendHeartbeat(TcpMessageReader reader, TcpMessageWriter writer) throws IOException {
         NodeHeartbeat hb = new NodeHeartbeat();
         hb.setNodeId(nodeId);
+        hb.setSessionId(sessionId);
         hb.setTimestampEpochMs(System.currentTimeMillis());
         hb.setFreeBytes(diskSpace(false));
 
@@ -284,6 +338,11 @@ public class NodeServer {
         ServerSocket s = serverSocket;
         if (s == null) throw new IllegalStateException("Node is not listening yet");
         return s.getLocalPort();
+    }
+
+    /** @return this node's data directory */
+    public Path getDataDir() {
+        return config.dataDir();
     }
 
     public String getNodeId() {

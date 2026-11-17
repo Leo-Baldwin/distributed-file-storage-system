@@ -84,6 +84,11 @@ public final class Dfs {
                 defaultValue = "${env:DFS_PORT:-9000}")
         int port;
 
+        @Option(names = "--data-dir",
+                description = "Where metadata is stored (env DFS_DATA_DIR, default ${DEFAULT-VALUE}).",
+                defaultValue = "${env:DFS_DATA_DIR:-coordinator-data}")
+        Path dataDir;
+
         @Option(names = "--replication-factor",
                 description = "Copies of each file (env DFS_REPLICATION_FACTOR, default ${DEFAULT-VALUE}).",
                 defaultValue = "${env:DFS_REPLICATION_FACTOR:-3}")
@@ -91,7 +96,7 @@ public final class Dfs {
 
         @Override
         public Integer call() {
-            new CoordinatorServer(new CoordinatorConfig(port, replicationFactor,
+            new CoordinatorServer(new CoordinatorConfig(port, dataDir, replicationFactor,
                     CoordinatorConfig.DEFAULT_HEARTBEAT_TIMEOUT_MS,
                     CoordinatorConfig.DEFAULT_SWEEP_INTERVAL_MS)).start();
             return 0;

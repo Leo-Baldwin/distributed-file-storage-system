@@ -1,49 +1,5 @@
 package com.leo.dfss.protocol;
 
-/**
- * Protocol message for uploading a chunk to a node.
- */
-public class ChunkUploadRequest {
-
-    private String type = "CHUNK_UPLOAD";
-
-    private  String fileId;
-    private int chunkIndex;
-
-    // Must match the number of bytes in the message body
-    private int bodyLength;
-
-    public ChunkUploadRequest() {}
-
-    public String  getType() {
-        return type;
-    }
-
-    public void setType(String type) {
-        this.type = type;
-    }
-
-    public String getFileId() {
-        return fileId;
-    }
-
-    public void setFileId(String fileId) {
-        this.fileId = fileId;
-    }
-
-    public int getChunkIndex() {
-        return chunkIndex;
-    }
-
-    public void setChunkIndex(int chunkIndex) {
-        this.chunkIndex = chunkIndex;
-    }
-
-    public int getBodyLength() {
-        return bodyLength;
-    }
-
-    public void setBodyLength(int bodyLength) {
-        this.bodyLength = bodyLength;
-    }
+/** CHUNK_UPLOAD (client → node). The body carries the chunk bytes, which must hash to {@code hash}. */
+public record ChunkUploadRequest(String hash) {
 }

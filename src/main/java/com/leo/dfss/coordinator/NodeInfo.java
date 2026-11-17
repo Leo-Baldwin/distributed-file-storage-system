@@ -27,6 +27,7 @@ public class NodeInfo {
     private final int port;
     private final long capacityBytes;
     private final String failureDomain;
+    private final String sessionId; // identifies the current registration (null for a restored node)
 
     private volatile long freeBytes; // Free space last reported by the node's heartbeat
 
@@ -42,6 +43,7 @@ public class NodeInfo {
                     int port,
                     long capacityBytes,
                     String failureDomain,
+                    String sessionId,
                     long lastSeenEpochMs) {
 
         this.nodeId = nodeId;
@@ -49,9 +51,22 @@ public class NodeInfo {
         this.port = port;
         this.capacityBytes = capacityBytes;
         this.failureDomain = failureDomain;
+        this.sessionId = sessionId;
         this.freeBytes = capacityBytes;
         this.lastSeenEpochMs = lastSeenEpochMs;
         this.status = Status.UP;
+    }
+
+    /**
+     * Recreates a node remembered from a previous Coordinator run. It starts DOWN and only
+     * becomes UP when the node itself registers again.
+     */
+    public static NodeInfo restored(String nodeId, String host, int port, long capacityBytes,
+                                    String failureDomain, long freeBytes, long lastSeenEpochMs) {
+        NodeInfo node = new NodeInfo(nodeId, host, port, capacityBytes, failureDomain, null, lastSeenEpochMs);
+        node.freeBytes = freeBytes;
+        node.status = Status.DOWN;
+        return node;
     }
 
     /**
@@ -87,6 +102,11 @@ public class NodeInfo {
      */
     public String getFailureDomain() {
         return failureDomain;
+    }
+
+    /** @return true if {@code sessionId} identifies this node's current registration */
+    public boolean isSession(String sessionId) {
+        return this.sessionId != null && this.sessionId.equals(sessionId);
     }
 
     /**

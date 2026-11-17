@@ -1,135 +1,163 @@
 package com.leo.dfss.node;
 
+import com.leo.dfss.common.ChunkHashes;
+
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.Stream;
 
 /**
- * Disk persistence layer for Node chunk storage.
+ * Content-addressed chunk storage on a Node's disk.
  *
- * Responsibilities:
- * - Writes chunk bytes to a deterministic on-disk layout.
- * - Reads chunk bytes back for download operations.
- * - Provides simple existence checks used for validation/debugging.
- *
- * On-disk layout:
+ * Each chunk is stored under the SHA-256 of its bytes:
  * <pre>
- *   <baseDir>/chunks/<fileId>/<chunkIndex>.bin
+ *   &lt;baseDir&gt;/chunks/ab/cd/abcd...(64 hex chars)
  * </pre>
+ * The two directory levels keep any one directory from holding millions of files.
+ *
+ * Properties that follow from addressing by hash:
+ * - Integrity: {@link #put} rejects bytes that don't match the hash they're stored under.
+ * - Deduplication: the same bytes are only ever stored once. A damaged existing copy is
+ *   detected and rewritten rather than silently kept.
+ * - Durability: a chunk is forced to disk before {@link #put} returns, so an acknowledged chunk
+ *   survives a power cut.
+ * - Safety: a valid hash is 64 hex characters, so it can't be used to escape the chunks directory.
  */
 public class ChunkStore {
 
-    private final Path baseDir;   // Base directory for all Node storage
-    private final Path chunksDir; // Directory containing per-file chunk folders
+    private final Path baseDir;
+    private final Path chunksDir;
 
-    /**
-     * Creates a ChunkStore rooted at the given base directory.
-     * The chunk root directory is created as <baseDir>/chunks.
-     *
-     * @param baseDir base directory for Node storage
-     */
     public ChunkStore(Path baseDir) {
         this.baseDir = baseDir;
         this.chunksDir = baseDir.resolve("chunks");
     }
 
     /**
-     * Writes a chunk to disk.
+     * Stores a chunk under its hash.
      *
-     * @param fileId unique file identifier of chunk
-     * @param chunkIndex chunk number
-     * @param data raw chunk bytes
+     * @return true if the chunk was newly written, false if it was already present
+     * @throws IllegalArgumentException if the hash is invalid or doesn't match the data
      */
-    public void writeChunk(String fileId, int chunkIndex, byte[] data) throws IOException {
-
-        requireValidFileId(fileId);
-        if (chunkIndex < 0) {
-            throw new IllegalArgumentException("chunkIndex cannot be negative");
-        }
+    public boolean put(String hash, byte[] data) throws IOException {
+        ChunkHashes.requireValid(hash);
         if (data == null) {
             throw new IllegalArgumentException("data cannot be null");
         }
-
-        Path fileDir = chunksDir.resolve(fileId);
-        Files.createDirectories(fileDir);
-
-        Path chunkPath = fileDir.resolve(chunkIndex + ".bin");
-
-        // Overwrite if the chunk already exists
-        Files.write(chunkPath, data,
-                StandardOpenOption.CREATE,
-                StandardOpenOption.TRUNCATE_EXISTING,
-                StandardOpenOption.WRITE);
-    }
-
-    /**
-     * Reads a chunk from disk.
-     *
-     * @param fileId unique file identifier of chunk
-     * @param chunkIndex chunk number
-     * @return chunk bytes
-     */
-    public byte[] readChunk(String fileId, int chunkIndex) throws IOException {
-
-        requireValidFileId(fileId);
-        if (chunkIndex < 0) {
-            throw new IllegalArgumentException("chunkIndex cannot be negative");
+        String actual = ChunkHashes.sha256Hex(data);
+        if (!actual.equals(hash)) {
+            throw new IllegalArgumentException("Chunk data does not match its hash (expected " + hash
+                    + ", got " + actual + ")");
         }
 
-        Path chunkPath = chunksDir
-                .resolve(fileId)
-                .resolve(chunkIndex + ".bin");
+        Path target = pathFor(hash);
+        if (Files.exists(target) && isIntact(target, hash)) {
+            return false; // identical content already stored, and the stored copy is good
+        }
+        // Either new, or the existing copy is damaged (e.g. truncated by a power cut): (re)write it
 
-        return Files.readAllBytes(chunkPath);
+        // Write to a temporary file, force it to disk, rename it into place, then force the
+        // directory entry to disk. Only then is it safe to acknowledge the chunk as stored:
+        // a crash at any point leaves either no file or a complete one under the hash name.
+        Files.createDirectories(target.getParent());
+        Path temp = Files.createTempFile(target.getParent(), ".incoming-", ".tmp");
+        try {
+            try (FileChannel ch = FileChannel.open(temp, StandardOpenOption.WRITE)) {
+                ByteBuffer buf = ByteBuffer.wrap(data);
+                while (buf.hasRemaining()) {
+                    ch.write(buf);
+                }
+                ch.force(true);
+            }
+            try {
+                Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
+            }
+            forceDirectory(target.getParent());
+        } finally {
+            Files.deleteIfExists(temp);
+        }
+        return true;
     }
 
-    /**
-     * Checks whether a specific chunk file exists on disk.
-     *
-     * @param fileId     unique file identifier
-     * @param chunkIndex chunk number (0-based)
-     * @return true if the chunk exists, otherwise false
-     */
-    public boolean chunkExists(String fileId, int chunkIndex) {
-        if (!isValidFileId(fileId) || chunkIndex < 0) {
+    /** @return true if the file at {@code path} hashes to {@code hash} */
+    private static boolean isIntact(Path path, String hash) {
+        try {
+            return ChunkHashes.sha256Hex(Files.readAllBytes(path)).equals(hash);
+        } catch (IOException e) {
             return false;
         }
-
-        Path chunkPath = chunksDir
-                .resolve(fileId)
-                .resolve(chunkIndex + ".bin");
-
-        return Files.exists(chunkPath);
     }
 
     /**
-     * File IDs are issued by the Coordinator as UUIDs. Accepting only that exact form means a
-     * client-supplied ID can never contain path separators or "..", so it can't escape chunksDir.
+     * Flushes a directory's entries to disk so a just-renamed file survives a power cut.
+     * Supported on Linux (where real nodes run); some platforms refuse to open a directory,
+     * which is ignored.
      */
-    private static final java.util.regex.Pattern FILE_ID =
-            java.util.regex.Pattern.compile("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$");
-
-    static boolean isValidFileId(String fileId) {
-        return fileId != null && FILE_ID.matcher(fileId).matches();
-    }
-
-    private static void requireValidFileId(String fileId) {
-        if (!isValidFileId(fileId)) {
-            throw new IllegalArgumentException("fileId must be a lowercase UUID");
+    private static void forceDirectory(Path dir) {
+        try (FileChannel ch = FileChannel.open(dir, StandardOpenOption.READ)) {
+            ch.force(true);
+        } catch (IOException | UnsupportedOperationException ignored) {
         }
     }
 
     /**
-     * @return base directory used by this ChunkStore
+     * Reads a chunk.
+     *
+     * @return the chunk bytes, or null if this node doesn't hold the chunk
      */
+    public byte[] get(String hash) throws IOException {
+        ChunkHashes.requireValid(hash);
+        try {
+            return Files.readAllBytes(pathFor(hash));
+        } catch (NoSuchFileException e) {
+            return null;
+        }
+    }
+
+    /** @return true if this node holds the chunk (false for invalid hashes) */
+    public boolean has(String hash) {
+        return ChunkHashes.isValid(hash) && Files.exists(pathFor(hash));
+    }
+
+    /**
+     * Lists every chunk hash stored on disk. Used to report this node's inventory to the
+     * Coordinator, which rebuilds chunk locations from the nodes themselves.
+     */
+    public List<String> listHashes() throws IOException {
+        List<String> hashes = new ArrayList<>();
+        if (!Files.isDirectory(chunksDir)) {
+            return hashes;
+        }
+        try (Stream<Path> files = Files.walk(chunksDir, 3)) {
+            files.filter(Files::isRegularFile)
+                    .map(p -> p.getFileName().toString())
+                    .filter(ChunkHashes::isValid) // skips leftover temp files
+                    .forEach(hashes::add);
+        }
+        return hashes;
+    }
+
+    private Path pathFor(String hash) {
+        return chunksDir.resolve(hash.substring(0, 2)).resolve(hash.substring(2, 4)).resolve(hash);
+    }
+
+    /** @return base directory used by this ChunkStore */
     public Path getBaseDir() {
         return baseDir;
     }
 
-    /**
-     * @return root directory that contains per-file chunk folders
-     */
+    /** @return root directory that holds the chunk files */
     public Path getChunksDir() {
         return chunksDir;
     }

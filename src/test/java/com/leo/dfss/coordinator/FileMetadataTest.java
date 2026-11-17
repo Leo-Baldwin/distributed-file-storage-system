@@ -9,13 +9,22 @@ class FileMetadataTest {
     @Test
     void totalChunks_usesCeilingDivision() {
         // total=10, chunk=4 => 3 chunks (4,4,2)
-        FileMetadata meta = new FileMetadata("file-1", "a.bin", 10, 4);
-        assertEquals(3, meta.getTotalChunks());
+        assertEquals(3, FileMetadata.totalChunks(10, 4));
     }
 
     @Test
     void totalChunks_exactDivision() {
-        FileMetadata meta = new FileMetadata("file-2", "b.bin", 12, 4);
-        assertEquals(3, meta.getTotalChunks());
+        assertEquals(3, FileMetadata.totalChunks(12, 4));
+    }
+
+    @Test
+    void totalChunks_doesNotOverflowForHugeSizes() {
+        assertEquals(Long.MAX_VALUE / 4 + 1, FileMetadata.totalChunks(Long.MAX_VALUE, 4));
+        assertThrows(IllegalArgumentException.class, () -> FileMetadata.totalChunks(-1, 4));
+    }
+
+    @Test
+    void totalChunks_emptyFileHasNoChunks() {
+        assertEquals(0, FileMetadata.totalChunks(0, 4));
     }
 }

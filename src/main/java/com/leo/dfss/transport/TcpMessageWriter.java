@@ -49,12 +49,21 @@ public class TcpMessageWriter {
         }
 
         int bodyLength = (body != null) ? body.length : 0;
+        // Refuse to send what the receiving TcpMessageReader would reject anyway
+        if (bodyLength > TcpMessageReader.MAX_BODY_BYTES) {
+            throw new IOException("Message body of " + bodyLength + " bytes exceeds the "
+                    + TcpMessageReader.MAX_BODY_BYTES + " byte limit");
+        }
         header.setBodyLength(bodyLength);
 
         // 1) Serialise header object to JSON bytes
         String headerString = GSON.toJson(header);
         byte[] headerBytes = headerString.getBytes(StandardCharsets.UTF_8);
         int headerLength = headerBytes.length;
+        if (headerLength > TcpMessageReader.MAX_HEADER_BYTES) {
+            throw new IOException("Message header of " + headerLength + " bytes exceeds the "
+                    + TcpMessageReader.MAX_HEADER_BYTES + " byte limit");
+        }
 
         // 2) Write 4-byte header length prefix
         out.writeInt(headerLength);

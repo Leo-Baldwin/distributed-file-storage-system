@@ -2,46 +2,41 @@ package com.leo.dfss.coordinator;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
-
+import com.leo.dfss.common.ChunkHashes;
 import com.leo.dfss.protocol.*;
-import com.leo.dfss.transport.*;
-
-import java.util.ArrayList;
-import java.util.List;
+import com.leo.dfss.transport.ReceivedMessage;
+import com.leo.dfss.transport.TcpMessageReader;
+import com.leo.dfss.transport.TcpMessageWriter;
 
 import java.io.IOException;
 import java.net.Socket;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 
 /**
  * Per-connection handler for the CoordinatorServer.
  *
  * Responsibilities:
- * - Reads framed protocol messages from a single TCP client.
- * - Validates and deserialises request payloads (JSON header data).
+ * - Reads framed protocol messages from a single TCP client (an upload/download client or a node).
+ * - Validates and deserialises request payloads. Everything from the network is untrusted:
+ *   bad input gets an ERROR reply, never an uncaught exception.
  * - Delegates business logic to {@link CoordinatorServer}.
- * - Sends structured protocol responses back to the client.
  *
- * Threading model:
- * - One instance of this class runs per TCP connection.
- * - Extends {@link Thread} so each connection is handled independently.
+ * Threading model: one instance (thread) per TCP connection.
  */
 public class CoordinatorConnection extends Thread {
 
+    private static final Gson gson = new Gson();
+
     private final Socket socket;
-    private final int connectionId; // for logging/identification
+    private final int connectionId;
     private final CoordinatorServer coordinator;
 
     private volatile boolean running = true;
 
-    private static final Gson gson = new Gson();
-
-    /**
-     * Creates a new per-connection handler.
-     *
-     * @param socket        connected client socket
-     * @param connectionId  unique identifier used for logging
-     * @param coordinator   reference to the central CoordinatorServer
-     */
     public CoordinatorConnection(Socket socket, int connectionId, CoordinatorServer coordinator) {
         this.socket = socket;
         this.connectionId = connectionId;
@@ -50,95 +45,78 @@ public class CoordinatorConnection extends Thread {
 
     @Override
     public void run() {
-        System.out.println("CoordinatorConnection " + connectionId + " started for " + socket.getRemoteSocketAddress());
-
         try {
             TcpMessageReader reader = new TcpMessageReader(socket.getInputStream());
-            TcpMessageWriter writer = new  TcpMessageWriter(socket.getOutputStream());
+            TcpMessageWriter writer = new TcpMessageWriter(socket.getOutputStream());
 
             // Send initial welcome message so client knows connection is established
             writer.send(new Message("WELCOME", "Connection " + connectionId + " ready."), null);
 
             while (running) {
-                // Read the next framed protocol message from the client
-                ReceivedMessage receivedMessage = reader.read();
-                if  (receivedMessage == null) {
-                    System.out.println("[" + connectionId + "] Client disconnected.");
-                    break;
+                ReceivedMessage received = reader.read();
+                if (received == null) {
+                    break; // client disconnected
                 }
 
-                Message header = receivedMessage.getHeader();
-
-                if (header == null || header.getType() == null) {
+                Message header = received.getHeader();
+                if (header.getType() == null) {
                     writer.send(new Message("ERROR", "Missing message type."), null);
                     continue;
                 }
 
-                String type = header.getType();
-
-                // Call the appropriate handler method based on message type
-                switch (type) {
-                    case "FILES_INIT_REQUEST":
-                        handleFilesInit(header, writer);
-                        break;
-                    case "FILES_COMMIT":
-                        handleFilesCommit(header, writer);
-                        break;
-                    case "FILES_GET_REQUEST":
-                        handleFilesGet(header, writer);
-                        break;
-                    case "NODE_REGISTER":
-                        handleNodeRegister(header, writer);
-                        break;
-                    case "NODE_HEARTBEAT":
-                        handleNodeHeartbeat(header, writer);
-                        break;
-                    case "QUIT":
-                        writer.send(new Message("GOODBYE", "Closing connection"), null);
-                        running = false; // break loop
-                        break;
-
-                    default:
-                        writer.send(new Message("ERROR", "Unknown message type: " + type), null);
-                        break;
+                try {
+                    switch (header.getType()) {
+                        case "FILES_INIT_REQUEST" -> handleFilesInit(header, writer);
+                        case "FILES_COMMIT" -> handleFilesCommit(header, received.getBody(), writer);
+                        case "FILES_GET_REQUEST" -> handleFilesGet(header, writer);
+                        case "NODE_REGISTER" -> handleNodeRegister(header, writer);
+                        case "NODE_HEARTBEAT" -> handleNodeHeartbeat(header, writer);
+                        case "NODE_CHUNKS_ADDED" -> handleChunksAdded(header, received.getBody(), writer);
+                        case "QUIT" -> {
+                            writer.send(new Message("GOODBYE", "Closing connection"), null);
+                            running = false;
+                        }
+                        default -> writer.send(new Message("ERROR", "Unknown message type: " + header.getType()), null);
+                    }
+                } catch (JsonSyntaxException | IllegalArgumentException e) {
+                    writer.send(new Message("ERROR", "Invalid " + header.getType() + ": " + e.getMessage()), null);
                 }
             }
         } catch (IOException e) {
-            System.out.println("[" + connectionId + "] Connection error: " + e.getMessage());
+            if (running) {
+                System.out.println("[" + connectionId + "] Connection error: " + e.getMessage());
+            }
+        } catch (RuntimeException e) {
+            // e.g. a metadata store failure: log it and drop this connection, not the whole server
+            System.out.println("[" + connectionId + "] Internal error: " + e);
         } finally {
-            // Ensure socket resources are released when the connection terminates
             try {
                 socket.close();
-            } catch (IOException e) {
-                e.printStackTrace();
+            } catch (IOException ignored) {
             }
         }
-        System.out.println("Connection " + connectionId + " closed.");
+    }
+
+    /** Parses the JSON payload of a message, rejecting a missing payload. */
+    private static <T> T parse(Message header, Class<T> type) {
+        if (header.getData() == null || header.getData().isBlank()) {
+            throw new IllegalArgumentException("missing JSON data");
+        }
+        T value = gson.fromJson(header.getData(), type);
+        if (value == null) {
+            throw new IllegalArgumentException("missing JSON data");
+        }
+        return value;
     }
 
     /**
-     * Handles FILES_INIT_REQUEST.
-     * Validates request fields and creates a new in-memory file metadata record
-     * via the Coordinator before returning upload location details.
+     * Handles FILES_INIT_REQUEST: validates the request, creates the file record and replies with
+     * the nodes to upload to.
      */
     private void handleFilesInit(Message header, TcpMessageWriter writer) throws IOException {
-        String data = header.getData();
+        FilesInitRequest request = parse(header, FilesInitRequest.class);
 
-        if  (data == null) {
-            writer.send(new Message("ERROR", "FILES_INIT_REQUEST requires JSON data"), null);
-            return;
-        }
-
-        FilesInitRequest request;
-
-        try {
-            request = gson.fromJson(data, FilesInitRequest.class);
-        } catch (Exception e) {
-            writer.send(new Message("ERROR", "Invalid JSON format for FILES_INIT_REQUEST."), null);
-            return;
-        }
-
-        String filename = request.getFilename();
+        String filename = request.filename();
         if (filename == null || filename.isBlank()) {
             writer.send(new Message("ERROR", "Missing file name."), null);
             return;
@@ -149,277 +127,174 @@ public class CoordinatorConnection extends Thread {
             writer.send(new Message("ERROR", "File name must not contain path separators."), null);
             return;
         }
-
-        if (request.getTotalSizeBytes() <= 0) {
-            writer.send(new Message("ERROR", "totalSizeBytes must be greater than 0."), null);
+        if (request.totalSizeBytes() < 0) {
+            writer.send(new Message("ERROR", "totalSizeBytes must not be negative."), null);
             return;
         }
-        if (request.getChunkSizeBytes() <= 0 || request.getChunkSizeBytes() > TcpMessageReader.MAX_BODY_BYTES) {
+        if (request.chunkSizeBytes() <= 0 || request.chunkSizeBytes() > TcpMessageReader.MAX_BODY_BYTES) {
             writer.send(new Message("ERROR",
                     "chunkSizeBytes must be between 1 and " + TcpMessageReader.MAX_BODY_BYTES + "."), null);
             return;
         }
 
-        // Call Coordinator to initialise file upload with metadata
-        FileMetadata meta;
+        CoordinatorServer.UploadPlan plan;
         try {
-            meta = coordinator.initFileUpload(
-                    request.getFilename(),
-                    request.getTotalSizeBytes(),
-                    request.getChunkSizeBytes());
+            plan = coordinator.initFileUpload(filename, request.totalSizeBytes(), request.chunkSizeBytes());
         } catch (IllegalStateException e) {
-            // e.g. no storage nodes are UP. Report it instead of letting it kill this connection thread.
+            // e.g. no storage nodes are UP
             writer.send(new Message("ERROR", e.getMessage()), null);
             return;
         }
 
-        // Respond to client with file details
-        FilesInitResponse response = new FilesInitResponse();
-
-        response.setFileId(meta.getFileId());
-        response.setTotalChunks(meta.getTotalChunks());
-        response.setChunkSizeBytes(meta.getChunkSizeBytes());
-
-        // Backward compatibility: keep legacy single upload host/port populated
-        response.setUploadHost(meta.getStorageHost());
-        response.setUploadPort(meta.getStoragePort());
-
-        // Replication: provide multiple upload targets (file-level replication)
-        List<FilesInitResponse.NodeEndpoint> targets = new ArrayList<>();
-        if (meta.getReplicaNodes() != null) {
-            for (FileMetadata.NodeEndpoint ep : meta.getReplicaNodes()) {
-                targets.add(new FilesInitResponse.NodeEndpoint(ep.getNodeId(), ep.getHost(), ep.getPort()));
-            }
-        }
-
-        response.setUploadTargets(targets);
-
-        writer.send(new Message(
-                "FILES_INIT_RESPONSE", gson.toJson(response)),
-                null);
+        List<NodeEndpoint> targets = plan.targets().stream()
+                .map(n -> new NodeEndpoint(n.getNodeId(), n.getHost(), n.getPort()))
+                .toList();
+        FilesInitResponse response = new FilesInitResponse(plan.file().fileId(),
+                (int) plan.file().totalChunks(), plan.file().chunkSizeBytes(), targets, plan.warning());
+        writer.send(new Message("FILES_INIT_RESPONSE", gson.toJson(response)), null);
     }
 
     /**
-     * Handles FILES_COMMIT.
-     * Marks the file as COMPLETE in the Coordinator if the fileId exists.
+     * Handles FILES_COMMIT. The body carries the file's ordered chunk hashes.
      */
-    private void handleFilesCommit(Message header, TcpMessageWriter writer) throws IOException {
-        String data = header.getData();
-
-        if (data == null || data.isBlank()) {
-            writer.send(new Message(
-                    "ERROR",
-                    "FILES_COMMIT requires JSON data"),
-                    null);
-            return;
-        }
-
-        FilesCommitRequest request;
-        try {
-            request = gson.fromJson(data, FilesCommitRequest.class);
-        } catch (Exception e) {
-            writer.send(new Message(
-                    "ERROR",
-                    "Invalid JSON format for FILES_COMMIT."),
-                    null);
-            return;
-        }
-
-        if (request.getFileId() == null || request.getFileId().isBlank()) {
-            writer.send(new Message(
-                    "ERROR",
-                    "fileId is required"),
-                    null);
-            return;
-        }
-
-        boolean ok = coordinator.commitFile(request.getFileId());
-
-        if (!ok) {
-            writer.send(new Message(
-                    "ERROR",
-                    "Unknown fileId or file is not uploading: " + request.getFileId()),
-                    null);
-            return;
-        }
-
-        FilesCommitAck ack = new FilesCommitAck();
-        ack.setFileId(request.getFileId());
-        ack.setStatus("OK");
-        ack.setMessage("File committed successfully");
-
-        writer.send(new Message(
-                "FILES_COMMIT_ACK",
-                gson.toJson(ack)),
-                null);
-    }
-
-    /**
-     * Handles FILES_GET_REQUEST.
-     * Returns file metadata and download location if the file exists and
-     * has reached the COMPLETE lifecycle state.
-     */
-    private void handleFilesGet(Message header, TcpMessageWriter writer) throws IOException {
-        String data = header.getData();
-
-        if (data == null || data.isBlank()) {
-            writer.send(new Message("ERROR", "FILES_GET_REQUEST requires JSON data"), null);
-            return;
-        }
-
-        FilesGetRequest request;
-        try {
-            request = gson.fromJson(data, FilesGetRequest.class);
-        } catch (Exception e) {
-            writer.send(new Message("ERROR", "Invalid JSON format for FILES_GET_REQUEST"), null);
-            return;
-        }
-
-        if (request.getFileId() == null || request.getFileId().isBlank()) {
+    private void handleFilesCommit(Message header, byte[] body, TcpMessageWriter writer) throws IOException {
+        FilesCommitRequest request = parse(header, FilesCommitRequest.class);
+        if (request.fileId() == null || request.fileId().isBlank()) {
             writer.send(new Message("ERROR", "fileId is required"), null);
             return;
         }
 
-        FileMetadata metadata = coordinator.getFile(request.getFileId());
+        List<String> hashes = ChunkHashes.unpack(body);
+        CoordinatorServer.CommitOutcome outcome = coordinator.commitFile(request.fileId(), hashes);
 
-        if (metadata == null) {
-            writer.send(new Message("ERROR", "Unknown fileId: " + request.getFileId()), null);
+        FilesCommitAck ack = new FilesCommitAck(request.fileId(), outcome.status(), outcome.message(),
+                outcome.missingChunks());
+        writer.send(new Message("FILES_COMMIT_ACK", gson.toJson(ack)), null);
+    }
+
+    /**
+     * Handles FILES_GET_REQUEST: returns the file's metadata plus, for every chunk, which UP nodes
+     * hold it. Only committed files can be downloaded.
+     */
+    private void handleFilesGet(Message header, TcpMessageWriter writer) throws IOException {
+        FilesGetRequest request = parse(header, FilesGetRequest.class);
+        if (request.fileId() == null || request.fileId().isBlank()) {
+            writer.send(new Message("ERROR", "fileId is required"), null);
             return;
         }
 
-        // Enforce lifecycle: only allow download if file has been fully committed
-        if (metadata.getStatus() != FileMetadata.Status.COMPLETE) {
+        Optional<FileMetadata> file = coordinator.getFile(request.fileId());
+        if (file.isEmpty()) {
+            writer.send(new Message("ERROR", "Unknown fileId: " + request.fileId()), null);
+            return;
+        }
+        if (file.get().status() != FileMetadata.Status.COMPLETE) {
             writer.send(new Message("ERROR", "File is not committed yet"), null);
             return;
         }
 
-        FilesGetResponse response = new FilesGetResponse();
-        response.setFileId(metadata.getFileId());
-        response.setFilename(metadata.getFileName());
-        response.setTotalChunks(metadata.getTotalChunks());
-        response.setChunkSizeBytes(metadata.getChunkSizeBytes());
+        // Build a compact node list and, per chunk, indexes into it (UP nodes only)
+        List<NodeEndpoint> nodeList = new ArrayList<>();
+        Map<String, Integer> nodeIndex = new HashMap<>();
+        List<ChunkPlacements.Placement> placements = new ArrayList<>();
+        ChunkLocations locations = coordinator.getChunkLocations();
 
-        // Backward compatibility: keep legacy single download host/port populated
-        response.setDownloadHost(metadata.getStorageHost());
-        response.setDownloadPort(metadata.getStoragePort());
-
-        // Replication: provide multiple download sources (file-level replication)
-        List<FilesGetResponse.NodeEndpoint> sources = new ArrayList<>();
-        if (metadata.getReplicaNodes() != null) {
-            for (FileMetadata.NodeEndpoint ep : metadata.getReplicaNodes()) {
-                sources.add(new FilesGetResponse.NodeEndpoint(ep.getNodeId(), ep.getHost(), ep.getPort()));
+        for (String hash : coordinator.getFileChunks(request.fileId())) {
+            List<Integer> indexes = new ArrayList<>();
+            for (String nodeId : locations.nodesFor(hash)) {
+                if (indexes.size() == CoordinatorServer.MAX_HOLDERS_LISTED) {
+                    break;
+                }
+                NodeInfo node = coordinator.getNodes().get(nodeId);
+                if (node == null || node.getStatus() != NodeInfo.Status.UP) {
+                    continue;
+                }
+                Integer idx = nodeIndex.get(nodeId);
+                if (idx == null) {
+                    idx = nodeList.size();
+                    nodeIndex.put(nodeId, idx);
+                    nodeList.add(new NodeEndpoint(nodeId, node.getHost(), node.getPort()));
+                }
+                indexes.add(idx);
             }
+            placements.add(new ChunkPlacements.Placement(hash, indexes.stream().mapToInt(Integer::intValue).toArray()));
         }
-        response.setDownloadSources(sources);
 
-        writer.send(new Message("FILES_GET_RESPONSE", gson.toJson(response)), null);
+        FileMetadata f = file.get();
+        FilesGetResponse response = new FilesGetResponse(f.fileId(), f.fileName(), f.totalSizeBytes(),
+                (int) f.totalChunks(), f.chunkSizeBytes(), nodeList);
+        writer.send(new Message("FILES_GET_RESPONSE", gson.toJson(response)), ChunkPlacements.encode(placements));
     }
 
     /**
-     * Handles NODE_REGISTER.
-     * Registers a storage node with the Coordinator's in-memory registry.
+     * Handles NODE_REGISTER. If the node doesn't say how clients should reach it, the address it
+     * connected from is used.
      */
-    private void handleNodeRegister(Message header, TcpMessageWriter writer) throws java.io.IOException {
-        String data = header.getData();
-        if (data == null) {
-            writer.send(new Message("ERROR", "NODE_REGISTER requires JSON data"), null);
-            return;
-        }
+    private void handleNodeRegister(Message header, TcpMessageWriter writer) throws IOException {
+        NodeRegisterRequest req = parse(header, NodeRegisterRequest.class);
 
-        NodeRegisterRequest req;
-        try {
-            req = gson.fromJson(data, NodeRegisterRequest.class);
-        } catch (JsonSyntaxException e) {
-            writer.send(new Message("ERROR", "Invalid JSON format for NODE_REGISTER"), null);
-            return;
-        }
-
+        NodeRegisterAck ack = new NodeRegisterAck();
         if (req.getNodeId() == null || req.getNodeId().isBlank() || req.getPort() <= 0) {
-
-            NodeRegisterAck ack = new NodeRegisterAck();
             ack.setStatus("ERROR");
             ack.setMessage("Missing/invalid fields (nodeId, port)");
-
             writer.send(new Message("NODE_REGISTER_ACK", gson.toJson(ack)), null);
             return;
         }
 
-        // If the node didn't say how clients should reach it, use the address it connected from
         String host = req.getHost();
         if (host == null || host.isBlank()) {
             host = socket.getInetAddress().getHostAddress();
         }
 
-        boolean ok = coordinator.registerNode(
-                req.getNodeId(),
-                host,
-                req.getPort(),
-                req.getCapacityBytes(),
-                req.getFailureDomain()
-        );
+        String sessionId = coordinator.registerNode(req.getNodeId(), host, req.getPort(),
+                req.getCapacityBytes(), req.getFailureDomain());
 
-        NodeRegisterAck ack = new NodeRegisterAck();
-        if (ok) {
-            ack.setStatus("OK");
-            ack.setMessage("Node registered");
-        } else {
-            ack.setStatus("ERROR");
-            ack.setMessage("Registration failed (invalid fields)");
-        }
-
+        ack.setStatus(sessionId != null ? "OK" : "ERROR");
+        ack.setMessage(sessionId != null ? "Node registered" : "Registration failed (invalid fields)");
+        ack.setSessionId(sessionId);
         writer.send(new Message("NODE_REGISTER_ACK", gson.toJson(ack)), null);
     }
 
     /**
-     * Handles NODE_HEARTBEAT.
-     * Updates the last-seen timestamp for a registered node.
+     * Handles NODE_HEARTBEAT. An unknown node gets an ERROR, which makes it re-register.
      */
-    private void handleNodeHeartbeat(Message header, TcpMessageWriter writer) throws java.io.IOException {
-        String data = header.getData();
-        if (data == null) {
-            writer.send(new Message("ERROR", "NODE_HEARTBEAT requires JSON data"), null);
-            return;
-        }
-
-        NodeHeartbeat hb;
-        try {
-            hb = gson.fromJson(data, NodeHeartbeat.class);
-        } catch (JsonSyntaxException e) {
-            writer.send(new Message("ERROR", "Invalid JSON format for NODE_HEARTBEAT"), null);
-            return;
-        }
-
+    private void handleNodeHeartbeat(Message header, TcpMessageWriter writer) throws IOException {
+        NodeHeartbeat hb = parse(header, NodeHeartbeat.class);
         if (hb.getNodeId() == null || hb.getNodeId().isBlank()) {
             writer.send(new Message("ERROR", "Heartbeat missing nodeId"), null);
             return;
         }
 
-        // If node didn't include a timestamp, you could default it; but we expect it.
-        long ts = hb.getTimestampEpochMs();
-        if (ts <= 0) {
-            ts = System.currentTimeMillis();
-        }
-
-        boolean ok = coordinator.handleHeartbeat(hb.getNodeId(), ts, hb.getFreeBytes());
-        if (!ok) {
-            writer.send(new Message("ERROR", "Unknown nodeId: " + hb.getNodeId()), null);
+        long ts = hb.getTimestampEpochMs() > 0 ? hb.getTimestampEpochMs() : System.currentTimeMillis();
+        if (!coordinator.handleHeartbeat(hb.getNodeId(), hb.getSessionId(), ts, hb.getFreeBytes())) {
+            writer.send(new Message("ERROR", "Unknown node or stale session: " + hb.getNodeId()), null);
             return;
         }
 
         NodeHeartbeatAck ack = new NodeHeartbeatAck();
         ack.setStatus("OK");
         ack.setServerTimeEpochMs(System.currentTimeMillis());
-
         writer.send(new Message("NODE_HEARTBEAT_ACK", gson.toJson(ack)), null);
     }
 
+    /**
+     * Handles NODE_CHUNKS_ADDED: the body lists chunk hashes the node now holds.
+     */
+    private void handleChunksAdded(Message header, byte[] body, TcpMessageWriter writer) throws IOException {
+        NodeChunksAdded msg = parse(header, NodeChunksAdded.class);
+        List<String> hashes = ChunkHashes.unpack(body);
+        if (!coordinator.chunksAdded(msg.nodeId(), msg.sessionId(), hashes)) {
+            writer.send(new Message("ERROR", "Unknown node or stale session: " + msg.nodeId()), null);
+            return;
+        }
+        writer.send(new Message("NODE_CHUNKS_ACK", String.valueOf(hashes.size())), null);
+    }
+
     public void shutdown() {
-        // Signal the run loop to terminate
         running = false;
         try {
             socket.close();
         } catch (IOException ignored) {
-            // ignore
         }
     }
 }

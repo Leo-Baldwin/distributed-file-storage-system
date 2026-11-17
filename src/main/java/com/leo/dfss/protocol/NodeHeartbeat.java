@@ -7,6 +7,7 @@ public class NodeHeartbeat {
 
     private String type = "NODE_HEARTBEAT";
     private String nodeId;
+    private String sessionId; // from NODE_REGISTER_ACK
     private long timestampEpochMs;
     private long freeBytes; // optional but useful
     private int bodyLength = 0;
@@ -51,5 +52,13 @@ public class NodeHeartbeat {
 
     public void setBodyLength(int bodyLength) {
         this.bodyLength = bodyLength;
+    }
+
+    public String getSessionId() {
+        return sessionId;
+    }
+
+    public void setSessionId(String sessionId) {
+        this.sessionId = sessionId;
     }
 }

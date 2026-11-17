@@ -20,8 +20,8 @@ The dissertation version is preserved at the tag [`v1.0-dissertation`](https://g
 |---|---|---|
 | 0 | Housekeeping: CI, tags | ✅ Done |
 | 1 | Hardening: limits, path safety, configuration, `dfs` CLI | ✅ Done |
-| 2 | Chunks named by hash, persistent metadata, snapshots | 🔜 Next |
-| 3 | Replication engine and erasure coding | Planned |
+| 2 | Chunks named by hash, persistent metadata, placement | ✅ Done |
+| 3 | Replication engine and erasure coding | 🔜 Next |
 | 4 | Encryption and access control | Planned |
 | 5 | Decentralised coordinator (recovery, then Raft) | Planned |
 | 6 | Backup workflow | Planned |
@@ -31,13 +31,15 @@ The dissertation version is preserved at the tag [`v1.0-dissertation`](https://g
 
 ---
 
-## Phase 2: Chunks named by hash, persistent metadata, snapshots
-- **Chunk address = SHA-256 of the stored bytes.** Use the layout `chunks/ab/cd/<hash>`. Nodes verify the hash on upload, and identical chunks are stored only once, so repeat backups only upload what changed.
-- **Snapshots:** a backup of a folder is a snapshot made of a timestamp, the source host, and the folder's paths, each mapped to a manifest. A manifest is the size, mode, modified time and ordered chunk hashes of one file.
-- **Persistent metadata in SQLite.** Tables: `nodes`, `chunk_locations`, `manifests`, `snapshots`.
-- **Inventory:** nodes report the chunks they hold when they register, then send changes with their heartbeats. This means chunk locations can always be rebuilt from the nodes themselves.
-- **Placement:** most free space first, copies in different failure domains (hosts), and only a partial set of copies (with a warning) when there are too few domains.
-- **Commit check:** a snapshot only counts as complete once every chunk is located on at least one node.
+## Phase 2: Chunks named by hash, persistent metadata, placement
+- **Chunk address = SHA-256 of the stored bytes.** Use the layout `chunks/ab/cd/<hash>`. Nodes verify the hash on upload, and identical chunks are stored only once, so repeat uploads of unchanged data cost no extra storage.
+- **Durable writes:** each chunk is forced to disk before it's acknowledged, and a damaged existing copy is detected and rewritten.
+- **Persistent metadata in SQLite:** files, each committed file's ordered chunk hashes, and known nodes.
+- **Chunk locations come from the nodes, not the database:** nodes report their full inventory on registering, then each new chunk as it arrives. The Coordinator rebuilds this index in memory, so it can never go stale on disk. Registration sessions ensure a node always re-sends its inventory if its registration is replaced.
+- **Placement:** never two copies in the same failure domain (host); the node with the most free space in each domain; fewer copies, with a warning, when there aren't enough domains.
+- **Commit check:** a file only becomes downloadable once every chunk is held by at least one node.
+- **End-to-end integrity:** clients verify every downloaded chunk against its hash and fall back to another copy if one is corrupt.
+- *Moved to Phase 6:* snapshots, which arrive together with the `dfs backup` command that creates them.
 
 ## Phase 3: The replication engine
 This builds on the dissertation's replication: writes go to several copies, heartbeats monitor health, and reads fail over. It adds what that version lacked: restoring copies, balancing, and per-path policy.
@@ -71,6 +73,7 @@ This builds on the dissertation's replication: writes go to several copies, hear
   - Losing any minority of hosts, including the leader, needs no manual action.
 
 ## Phase 6: The backup workflow
+- **Snapshots:** a backup of a folder is a snapshot made of a timestamp, the source host, and the folder's paths, each mapped to a manifest (size, mode, modified time, ordered chunk hashes).
 - **Commands:**
   - `dfs backup <dir>` (only changed chunks are uploaded)
   - `dfs snapshots`
